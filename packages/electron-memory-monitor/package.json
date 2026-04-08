@@ -49,7 +49,22 @@
     "memory",
     "profiling",
     "monitoring",
-    "performance"
+    "performance",
+    "memory-leak",
+    "v8-heap",
+    "dashboard",
+    "anomaly-detection",
+    "regression-testing"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spcBackToLife/electron-memery-track.git",
+    "directory": "packages/electron-memory-monitor"
+  },
+  "homepage": "https://github.com/spcBackToLife/electron-memery-track#readme",
+  "bugs": {
+    "url": "https://github.com/spcBackToLife/electron-memery-track/issues"
+  },
+  "author": "spcBackToLife"
 }
