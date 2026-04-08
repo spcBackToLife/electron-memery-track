@@ -1,10 +1,13 @@
 # Dependencies
 node_modules
 
-# Build output
-dist
-dist-electron
+# Build output (apps)
+apps/**/dist
+apps/**/dist-electron
 release
+
+# Keep SDK dist (pre-built for demo apps)
+# packages/electron-memory-monitor/dist is committed intentionally
 
 # Logs
 *.log
