@@ -1,0 +1,285 @@
+/* ===== 全局重置 ===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  font-size: 13px;
+  background: #1e1e2e;
+  color: #cdd6f4;
+}
+
+/* ===== 工具栏容器 ===== */
+.browser-sim-toolbar {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1e1e2e;
+  overflow: hidden;
+}
+
+/* ===== 地址栏 ===== */
+.address-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.address-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.logo {
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.url-input {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid #45475a;
+  background: #313244;
+  color: #cdd6f4;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.2s;
+
+  &:focus {
+    border-color: #89b4fa;
+  }
+}
+
+.address-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ===== 内存徽章 ===== */
+.memory-badge {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #313244;
+  font-size: 11px;
+
+  .label {
+    color: #6c7086;
+  }
+
+  .value {
+    color: #89b4fa;
+    font-weight: 600;
+    font-family: 'Cascadia Code', 'Fira Code', monospace;
+  }
+
+  &.trend-up .value {
+    color: #f38ba8;
+  }
+
+  &.trend-down .value {
+    color: #a6e3a1;
+  }
+}
+
+/* ===== 按钮 ===== */
+.btn {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.15s;
+  white-space: nowrap;
+  flex-shrink: 0;
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
+.btn-primary {
+  background: #89b4fa;
+  color: #1e1e2e;
+
+  &:hover:not(:disabled) {
+    background: #74c7ec;
+  }
+}
+
+.btn-danger {
+  background: #f38ba8;
+  color: #1e1e2e;
+
+  &:hover:not(:disabled) {
+    background: #eba0ac;
+  }
+}
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+
+/* ===== 下方区域 ===== */
+.bottom-section {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  border-bottom: 1px solid #313244;
+}
+
+/* ===== 标签栏 ===== */
+.tab-bar {
+  flex: 1;
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 2px;
+  padding: 6px 8px;
+  overflow-y: auto;
+  min-width: 0;
+  align-content: flex-start;
+}
+
+.no-tabs {
+  color: #6c7086;
+  font-size: 12px;
+  padding: 8px;
+}
+
+.tab-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  background: #313244;
+  cursor: pointer;
+  max-width: 180px;
+  transition: background 0.15s;
+
+  &:hover {
+    background: #45475a;
+  }
+
+  &.active {
+    background: #89b4fa;
+    color: #1e1e2e;
+
+    .tab-close {
+      color: #1e1e2e;
+      &:hover {
+        background: rgba(0, 0, 0, 0.2);
+      }
+    }
+  }
+}
+
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  max-width: 140px;
+}
+
+.tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: none;
+  background: transparent;
+  color: #6c7086;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+
+  &:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #f38ba8;
+  }
+}
+
+/* ===== 自动测试面板 ===== */
+.auto-test-panel {
+  flex-shrink: 0;
+  width: 360px;
+  padding: 8px 12px;
+  background: #181825;
+  border-left: 1px solid #313244;
+  overflow-y: auto;
+}
+
+.auto-test-config {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: flex-end;
+
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11px;
+    color: #6c7086;
+
+    input {
+      width: 80px;
+      padding: 3px 6px;
+      border-radius: 4px;
+      border: 1px solid #45475a;
+      background: #313244;
+      color: #cdd6f4;
+      font-size: 12px;
+      outline: none;
+
+      &:focus {
+        border-color: #89b4fa;
+      }
+    }
+  }
+}
+
+.auto-test-running {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+
+  .spinner {
+    animation: spin 1s linear infinite;
+  }
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}

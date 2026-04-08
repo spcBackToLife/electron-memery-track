@@ -1,0 +1,55 @@
+{
+  "name": "@electron-memory/monitor",
+  "version": "0.1.0",
+  "description": "Electron memory profiling SDK - zero-intrusion memory monitoring, anomaly detection, and regression analysis",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./preload": {
+      "types": "./dist/preload.d.ts",
+      "import": "./dist/preload.mjs",
+      "require": "./dist/preload.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup && vite build",
+    "build:node": "tsup",
+    "build:ui": "vite build",
+    "dev": "tsup --watch",
+    "clean": "rimraf dist"
+  },
+  "peerDependencies": {
+    "electron": ">=20.0.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "tsup": "^8.0.0",
+    "typescript": "^5.6.3",
+    "rimraf": "^5.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "recharts": "^2.12.0",
+    "vite": "^6.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "less": "^4.2.1"
+  },
+  "keywords": [
+    "electron",
+    "memory",
+    "profiling",
+    "monitoring",
+    "performance"
+  ],
+  "license": "MIT"
+}
