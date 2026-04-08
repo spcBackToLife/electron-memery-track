@@ -1,0 +1,35 @@
+{
+  "name": "electron-memory-benchmark",
+  "version": "0.1.0",
+  "description": "Electron 内存优化专项 — Monorepo：SDK + 多场景基线测试",
+  "private": true,
+  "scripts": {
+    "dev:bare-minimum": "pnpm --filter @electron-benchmark/bare-minimum dev",
+    "dev:single-window": "pnpm --filter @electron-benchmark/single-window dev",
+    "dev:multi-window": "pnpm --filter @electron-benchmark/multi-window dev",
+    "dev:multi-window:10": "pnpm --filter @electron-benchmark/multi-window dev:10",
+    "dev:multi-window:20": "pnpm --filter @electron-benchmark/multi-window dev:20",
+    "dev:heavy-renderer": "pnpm --filter @electron-benchmark/heavy-renderer dev",
+    "dev:ipc-stress": "pnpm --filter @electron-benchmark/ipc-stress dev",
+    "dev:real-world": "pnpm --filter @electron-benchmark/real-world-sim dev",
+    "dev:browser-sim": "pnpm --filter @electron-benchmark/browser-sim dev",
+    "dev:demo": "pnpm --filter @electron-benchmark/electron-demo dev",
+    "build:sdk": "pnpm --filter @electron-memory/monitor build",
+    "build:all": "pnpm build:sdk && pnpm -r --filter \"./apps/*\" build",
+    "clean": "pnpm -r clean",
+    "install:all": "pnpm install"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild"
+    ]
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  }
+}

@@ -1,0 +1,176 @@
+// 颜色变量
+@primary-color: #646cff;
+@primary-hover: #535bf2;
+@react-color: #61dafb;
+@card-bg: rgba(255, 255, 255, 0.05);
+@card-border: rgba(255, 255, 255, 0.1);
+
+.app {
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 40px 20px;
+}
+
+.app-header {
+  text-align: center;
+  margin-bottom: 40px;
+
+  .logo-container {
+    display: flex;
+    justify-content: center;
+    gap: 24px;
+    margin-bottom: 24px;
+
+    .logo {
+      font-size: 48px;
+      transition: transform 0.3s ease;
+
+      &:hover {
+        transform: scale(1.2);
+      }
+    }
+
+    .react-logo {
+      animation: spin 4s linear infinite;
+    }
+  }
+
+  h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    background: linear-gradient(135deg, @primary-color, @react-color);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    margin-bottom: 8px;
+  }
+
+  .subtitle {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 1rem;
+  }
+}
+
+.app-main {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 24px;
+  justify-content: center;
+  max-width: 800px;
+  width: 100%;
+}
+
+.card {
+  background: @card-bg;
+  border: 1px solid @card-border;
+  border-radius: 12px;
+  padding: 24px;
+  width: 100%;
+  max-width: 380px;
+  backdrop-filter: blur(10px);
+  transition: border-color 0.3s ease, box-shadow 0.3s ease;
+
+  &:hover {
+    border-color: @primary-color;
+    box-shadow: 0 0 20px rgba(100, 108, 255, 0.15);
+  }
+
+  h2 {
+    font-size: 1.25rem;
+    margin-bottom: 20px;
+    color: #fff;
+  }
+}
+
+.counter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 20px;
+
+  button {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+    border: 1px solid @card-border;
+    background: @card-bg;
+    color: #fff;
+    font-size: 1.5rem;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    &:hover {
+      background: @primary-color;
+      border-color: @primary-color;
+      transform: scale(1.05);
+    }
+
+    &:active {
+      transform: scale(0.95);
+    }
+  }
+
+  .count {
+    font-size: 2.5rem;
+    font-weight: 700;
+    min-width: 80px;
+    text-align: center;
+    color: @primary-color;
+  }
+}
+
+.info-card {
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+
+  .info-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 8px;
+
+    .label {
+      font-size: 0.75rem;
+      color: rgba(255, 255, 255, 0.4);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .value {
+      font-size: 0.9rem;
+      color: @react-color;
+      font-weight: 500;
+    }
+  }
+}
+
+.app-footer {
+  margin-top: 48px;
+  text-align: center;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 0.9rem;
+
+  p {
+    line-height: 1.8;
+  }
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}

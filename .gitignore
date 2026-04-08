@@ -1,0 +1,36 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+dist-electron
+release
+
+# Logs
+*.log
+
+# Reports (generated at runtime)
+reports/*
+!reports/.gitkeep
+
+# IDE & Editor
+.codebuddy
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Debug
+bare-stderr.log
+bare-stdout.log
