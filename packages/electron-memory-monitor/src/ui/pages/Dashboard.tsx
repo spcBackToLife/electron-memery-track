@@ -2,6 +2,7 @@ import React, { useEffect } from 'react'
 import MetricCard from '../components/MetricCard'
 import ProcessTable from '../components/ProcessTable'
 import MemoryChart from '../components/MemoryChart'
+import MarkMemoryExplorer from '../components/MarkMemoryExplorer'
 import MemoryPieChart from '../components/MemoryPieChart'
 import AlertPanel from '../components/AlertPanel'
 import SessionControl from '../components/SessionControl'
@@ -25,15 +26,19 @@ const formatBytes = (bytes: number | undefined | null): string => {
   return `${bytes} B`
 }
 
-const Dashboard: React.FC = () => {
+interface DashboardProps {
+  paneVisible?: boolean
+}
+
+const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
   const {
     snapshots,
     latestSnapshot,
     anomalies,
-    isCollecting,
     triggerGC,
     addMark,
     clearAnomalies,
+    markTimeline,
   } = useMemoryData()
 
   const {
@@ -45,8 +50,8 @@ const Dashboard: React.FC = () => {
   } = useSession()
 
   useEffect(() => {
-    void refreshSessions()
-  }, [refreshSessions])
+    if (paneVisible) void refreshSessions()
+  }, [paneVisible, refreshSessions])
 
   if (!latestSnapshot) {
     return (
@@ -71,6 +76,7 @@ const Dashboard: React.FC = () => {
         onStop={stopSession}
         onTriggerGC={triggerGC}
         onAddMark={addMark}
+        markCount={markTimeline.length}
       />
 
       {/* 顶部指标卡片 */}
@@ -118,12 +124,23 @@ const Dashboard: React.FC = () => {
       <div className="charts-row">
         <div className="chart-container chart-wide">
           <h3>📈 内存趋势</h3>
+          <p className="chart-marks-caption">
+            代码里 <code>monitor.mark()</code> 或手动「标记」会在<strong>下一拍采样</strong>写入；趋势图横轴为时间戳，橙色竖线为各 Mark 时刻。
+          </p>
           <MemoryChart snapshots={snapshots} height={300} />
         </div>
         <div className="chart-container chart-narrow">
           <h3>🥧 内存分布</h3>
           <MemoryPieChart processes={latestSnapshot.processes} height={300} />
         </div>
+      </div>
+
+      <div className="section dashboard-mark-explorer-section">
+        <h3>📍 标记点内存对比与详情</h3>
+        <p className="report-marks-hint" style={{ marginTop: 0 }}>
+          下图汇总当前缓冲区内各标记所在采样时刻；下拉或点击柱形查看该时刻的进程表与主进程 V8 堆空间（与下方常驻面板一致）。完整会话请结束后在「历史报告」查看。
+        </p>
+        <MarkMemoryExplorer snapshots={snapshots} variant="dashboard" />
       </div>
 
       {/* 进程表格 */}

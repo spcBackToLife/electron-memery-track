@@ -4,7 +4,9 @@ import MemoryChart from '../components/MemoryChart'
 import MemoryPieChart from '../components/MemoryPieChart'
 import ProcessTable from '../components/ProcessTable'
 import V8HeapDetail from '../components/V8HeapDetail'
+import MarkMemoryExplorer from '../components/MarkMemoryExplorer'
 import { useSession } from '../hooks/useSession'
+import { eventMarksFromSnapshots } from '../utils/eventMarksFromSnapshots'
 import type { TestSession } from '../../types/session'
 import type { SessionReport } from '../../types/report'
 import type { MemorySnapshot } from '../../types/snapshot'
@@ -58,7 +60,12 @@ const GRANULARITY_OPTIONS = [
   { label: '最多 1000 点', value: 1000 },
 ] as const
 
-const Report: React.FC = () => {
+interface ReportProps {
+  /** 当前是否在顶部选中了「历史报告」页（用于从其它页返回时刷新会话列表） */
+  paneVisible?: boolean
+}
+
+const Report: React.FC<ReportProps> = ({ paneVisible = true }) => {
   const { sessions, refreshSessions, getSessionReport, getSessionSnapshots, exportSession, importSession, deleteSession } = useSession()
   const [selectedSession, setSelectedSession] = useState<TestSession | null>(null)
   const [report, setReport] = useState<SessionReport | null>(null)
@@ -79,23 +86,57 @@ const Report: React.FC = () => {
   const [showPie, setShowPie] = useState(true)
   const [showProcesses, setShowProcesses] = useState(true)
   const [showV8, setShowV8] = useState(true)
+  const [showMarkExplorer, setShowMarkExplorer] = useState(true)
 
   useEffect(() => {
-    refreshSessions()
-  }, [refreshSessions])
+    if (paneVisible) void refreshSessions()
+  }, [paneVisible, refreshSessions])
 
-  const handleSelectSession = async (session: TestSession) => {
+  // 左侧列表随磁盘更新（例如在实时监控里结束会话后）；会话被删除时取消选中
+  useEffect(() => {
+    setSelectedSession((prev) => {
+      if (!prev) return prev
+      const updated = sessions.find((s) => s.id === prev.id)
+      if (!updated) return null
+      if (
+        prev.status === updated.status &&
+        prev.snapshotCount === updated.snapshotCount &&
+        prev.endTime === updated.endTime &&
+        prev.duration === updated.duration
+      ) {
+        return prev
+      }
+      return updated
+    })
+  }, [sessions])
+
+  const handleSelectSession = (session: TestSession) => {
     setSelectedSession(session)
-    setLoading(true)
     setTimePreset('all')
-    try {
-      const r = await getSessionReport(session.id)
-      setReport(r)
-    } catch (err) {
-      console.error('Failed to load report:', err)
-    }
-    setLoading(false)
   }
+
+  useEffect(() => {
+    if (!selectedSession) {
+      setReport(null)
+      return
+    }
+    let cancelled = false
+    setLoading(true)
+    ;(async () => {
+      try {
+        const r = await getSessionReport(selectedSession.id)
+        if (!cancelled) setReport(r)
+      } catch (err) {
+        console.error('Failed to load report:', err)
+        if (!cancelled) setReport(null)
+      } finally {
+        if (!cancelled) setLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedSession?.id, selectedSession?.status, selectedSession?.endTime, getSessionReport])
 
   // 计算实际的时间范围
   const timeRange = useMemo(() => {
@@ -208,6 +249,11 @@ const Report: React.FC = () => {
     if (snapshots.length === 0) return null
     return snapshots[Math.floor(snapshots.length / 2)]
   }, [snapshots])
+
+  const marksForTable = useMemo(() => {
+    if (report?.eventMarks && report.eventMarks.length > 0) return report.eventMarks
+    return eventMarksFromSnapshots(snapshots)
+  }, [report?.eventMarks, snapshots])
 
   return (
     <div className="report-page">
@@ -373,6 +419,48 @@ const Report: React.FC = () => {
                 </table>
               </div>
 
+              {/* 阶段标记：报告 eventMarks 或从已加载快照推导（兼容旧 report.json） */}
+              {marksForTable.length > 0 && (
+                <div className="report-section">
+                  <h3>📍 阶段标记（Mark）</h3>
+                  <p className="report-marks-hint">
+                    下列数值为<strong>该次采样时刻</strong>的快照内存；趋势图中以橙色竖线标出对应时间。未手动点「标记」的会话此处为空。
+                  </p>
+                  <div className="report-marks-table-wrap">
+                    <table className="report-marks-table">
+                      <thead>
+                        <tr>
+                          <th>时间</th>
+                          <th>标签</th>
+                          <th>总内存</th>
+                          <th>主进程</th>
+                          <th>渲染</th>
+                          <th>GPU</th>
+                          <th>附注</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {marksForTable.map((m, i) => (
+                          <tr key={`${m.timestamp}-${i}-${m.label}`}>
+                            <td>{formatTimeHM(m.timestamp)}</td>
+                            <td className="mark-label-cell">{m.label}</td>
+                            <td>{formatKB(m.totalWorkingSetKB)}</td>
+                            <td>{formatKB(m.browserKB)}</td>
+                            <td>{formatKB(m.rendererKB)}</td>
+                            <td>{formatKB(m.gpuKB)}</td>
+                            <td className="mark-meta-cell">
+                              {m.metadata && Object.keys(m.metadata).length > 0
+                                ? JSON.stringify(m.metadata)
+                                : '—'}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
               {/* ========== 可视化面板：时间控制 + 图表 ========== */}
               <div className="report-section report-visual-section">
                 <h3>📈 数据可视化</h3>
@@ -441,6 +529,12 @@ const Report: React.FC = () => {
                   <button className={`panel-toggle ${showV8 ? 'active' : ''}`} onClick={() => setShowV8(!showV8)}>
                     🔧 V8 堆详情
                   </button>
+                  <button
+                    className={`panel-toggle ${showMarkExplorer ? 'active' : ''}`}
+                    onClick={() => setShowMarkExplorer(!showMarkExplorer)}
+                  >
+                    📌 标记对比与详情
+                  </button>
                 </div>
 
                 {snapshotsLoading && (
@@ -463,8 +557,16 @@ const Report: React.FC = () => {
                       <div className="report-chart-panel">
                         <div className="chart-container" style={{ margin: 0 }}>
                           <h4>📈 内存趋势（{formatTimeHM(snapshots[0].timestamp)} ~ {formatTimeHM(snapshots[snapshots.length - 1].timestamp)}）</h4>
+                          <p className="chart-marks-caption">有 Mark 时以橙色竖线标在对应时间；详见「标记对比与详情」查看各标记时刻的进程与 V8 堆。</p>
                           <MemoryChart snapshots={snapshots} height={320} />
                         </div>
+                      </div>
+                    )}
+
+                    {showMarkExplorer && (
+                      <div className="report-chart-panel mark-explorer-report-panel">
+                        <h4>📌 标记点内存对比与详情</h4>
+                        <MarkMemoryExplorer snapshots={snapshots} variant="report" />
                       </div>
                     )}
 

@@ -35,6 +35,18 @@ export interface TrendInfo {
   confidence: 'high' | 'medium' | 'low'
 }
 
+/** 会话中的阶段标记（写入报告，便于对照各阶段内存） */
+export interface SessionEventMark {
+  timestamp: number
+  label: string
+  metadata?: Record<string, unknown>
+  /** 该标记随附快照时刻的总工作集 (KB) */
+  totalWorkingSetKB: number
+  browserKB: number
+  rendererKB: number
+  gpuKB: number
+}
+
 /** 改进建议 */
 export interface Suggestion {
   /** 建议 ID */
@@ -102,6 +114,9 @@ export interface SessionReport {
 
   // ===== 改进建议 =====
   suggestions: Suggestion[]
+
+  /** 阶段标记汇总（与快照中的 marks 一致，便于表格展示） */
+  eventMarks?: SessionEventMark[]
 
   // ===== 数据文件 =====
   dataFile: string

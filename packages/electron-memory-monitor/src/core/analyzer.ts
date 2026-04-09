@@ -13,6 +13,7 @@ import type { MemorySnapshot } from '../types/snapshot'
 import type { AnomalyEvent } from '../types/anomaly'
 import type {
   SessionReport,
+  SessionEventMark,
   MetricSummary,
   TrendInfo,
   Suggestion,
@@ -34,11 +35,41 @@ export class Analyzer {
     anomalies: AnomalyEvent[],
     dataFile: string
   ): SessionReport {
+    const environment = this.collectEnvironment()
+    const eventMarks = this.collectEventMarks(snapshots)
+
     if (snapshots.length === 0) {
-      throw new Error('No snapshots to analyze')
+      const summary = this.emptySummary()
+      const suggestions: Suggestion[] = [
+        {
+          id: 'no-snapshots',
+          severity: 'info',
+          category: 'optimization',
+          title: '会话内没有可用的内存快照',
+          description:
+            '结束会话时磁盘上尚未写入任何采样点（例如刚启动就立刻结束，或采集间隔尚未触发）。报告中的统计与趋势无法计算。',
+          suggestions: [
+            '保持会话开启至少一个采集周期后再点「结束会话」',
+            '在配置中适当缩短采集间隔以便更快得到数据',
+          ],
+        },
+      ]
+      return {
+        sessionId,
+        label,
+        description,
+        startTime,
+        endTime,
+        duration: endTime - startTime,
+        environment,
+        summary,
+        anomalies,
+        suggestions,
+        eventMarks,
+        dataFile,
+      }
     }
 
-    const environment = this.collectEnvironment()
     const summary = this.computeSummary(snapshots)
     const suggestions = this.generateSuggestions(snapshots, summary, anomalies)
 
@@ -53,6 +84,7 @@ export class Analyzer {
       summary,
       anomalies,
       suggestions,
+      eventMarks,
       dataFile,
     }
   }
@@ -96,6 +128,61 @@ export class Analyzer {
   }
 
   // ===== 私有方法 =====
+
+  private emptySummary(): SessionReport['summary'] {
+    const z = this.computeMetricSummary([])
+    const stable: TrendInfo = { slope: 0, r2: 0, direction: 'stable', confidence: 'low' }
+    return {
+      totalProcesses: { min: 0, max: 0, avg: 0 },
+      totalMemory: z,
+      byProcessType: {
+        browser: z,
+        renderer: [],
+        gpu: null,
+        utility: null,
+      },
+      mainV8Heap: {
+        heapUsed: z,
+        heapTotal: z,
+        external: z,
+        arrayBuffers: z,
+      },
+      trends: {
+        totalMemory: stable,
+        browserMemory: stable,
+        rendererMemory: stable,
+      },
+    }
+  }
+
+  /** 从快照展平所有标记，并附上该采样点的分类内存（KB） */
+  private collectEventMarks(snapshots: MemorySnapshot[]): SessionEventMark[] {
+    const out: SessionEventMark[] = []
+    for (const s of snapshots) {
+      if (!s.marks?.length) continue
+      const browserKB = s.processes
+        .filter((p) => p.type === 'Browser')
+        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      const rendererKB = s.processes
+        .filter((p) => p.type === 'Tab' && !p.isMonitorProcess)
+        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      const gpuKB = s.processes
+        .filter((p) => p.type === 'GPU')
+        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      for (const m of s.marks) {
+        out.push({
+          timestamp: m.timestamp,
+          label: m.label,
+          metadata: m.metadata,
+          totalWorkingSetKB: s.totalWorkingSetSize,
+          browserKB,
+          rendererKB,
+          gpuKB,
+        })
+      }
+    }
+    return out
+  }
 
   private collectEnvironment(): SessionReport['environment'] {
     const cpus = os.cpus()

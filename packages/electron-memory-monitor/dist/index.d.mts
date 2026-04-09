@@ -288,6 +288,17 @@ interface TrendInfo {
     /** 置信度 */
     confidence: 'high' | 'medium' | 'low';
 }
+/** 会话中的阶段标记（写入报告，便于对照各阶段内存） */
+interface SessionEventMark {
+    timestamp: number;
+    label: string;
+    metadata?: Record<string, unknown>;
+    /** 该标记随附快照时刻的总工作集 (KB) */
+    totalWorkingSetKB: number;
+    browserKB: number;
+    rendererKB: number;
+    gpuKB: number;
+}
 /** 改进建议 */
 interface Suggestion {
     /** 建议 ID */
@@ -350,6 +361,8 @@ interface SessionReport {
     };
     anomalies: AnomalyEvent[];
     suggestions: Suggestion[];
+    /** 阶段标记汇总（与快照中的 marks 一致，便于表格展示） */
+    eventMarks?: SessionEventMark[];
     dataFile: string;
 }
 /** 指标差异 */
@@ -527,4 +540,4 @@ declare const IPC_CHANNELS: {
     readonly RENDERER_REQUEST: "emm:renderer:request";
 };
 
-export { type AnomalyCategory, type AnomalyEvent, type AnomalyRule, type AnomalySeverity, type CompareReport, ElectronMemoryMonitor, type EventMark, type GCResult, IPC_CHANNELS, type Improvement, type MemorySnapshot, type MetricDiff, type MetricSummary, type MonitorConfig, type ProcessMemoryInfo, type Regression, type RendererV8Detail, type SessionIndex, type SessionReport, type Suggestion, type SystemMemoryInfo, type TestSession, type TrendInfo, type V8HeapDetailStats, type V8HeapSpaceInfo, type V8HeapStats, registerDashboardSchemePrivileged };
+export { type AnomalyCategory, type AnomalyEvent, type AnomalyRule, type AnomalySeverity, type CompareReport, ElectronMemoryMonitor, type EventMark, type GCResult, IPC_CHANNELS, type Improvement, type MemorySnapshot, type MetricDiff, type MetricSummary, type MonitorConfig, type ProcessMemoryInfo, type Regression, type RendererV8Detail, type SessionEventMark, type SessionIndex, type SessionReport, type Suggestion, type SystemMemoryInfo, type TestSession, type TrendInfo, type V8HeapDetailStats, type V8HeapSpaceInfo, type V8HeapStats, registerDashboardSchemePrivileged };

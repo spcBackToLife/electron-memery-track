@@ -654,10 +654,38 @@ import * as os2 from "os";
 var Analyzer = class {
   /** 生成会话报告 */
   generateReport(sessionId, label, description, startTime, endTime, snapshots, anomalies, dataFile) {
-    if (snapshots.length === 0) {
-      throw new Error("No snapshots to analyze");
-    }
     const environment = this.collectEnvironment();
+    const eventMarks = this.collectEventMarks(snapshots);
+    if (snapshots.length === 0) {
+      const summary2 = this.emptySummary();
+      const suggestions2 = [
+        {
+          id: "no-snapshots",
+          severity: "info",
+          category: "optimization",
+          title: "\u4F1A\u8BDD\u5185\u6CA1\u6709\u53EF\u7528\u7684\u5185\u5B58\u5FEB\u7167",
+          description: "\u7ED3\u675F\u4F1A\u8BDD\u65F6\u78C1\u76D8\u4E0A\u5C1A\u672A\u5199\u5165\u4EFB\u4F55\u91C7\u6837\u70B9\uFF08\u4F8B\u5982\u521A\u542F\u52A8\u5C31\u7ACB\u523B\u7ED3\u675F\uFF0C\u6216\u91C7\u96C6\u95F4\u9694\u5C1A\u672A\u89E6\u53D1\uFF09\u3002\u62A5\u544A\u4E2D\u7684\u7EDF\u8BA1\u4E0E\u8D8B\u52BF\u65E0\u6CD5\u8BA1\u7B97\u3002",
+          suggestions: [
+            "\u4FDD\u6301\u4F1A\u8BDD\u5F00\u542F\u81F3\u5C11\u4E00\u4E2A\u91C7\u96C6\u5468\u671F\u540E\u518D\u70B9\u300C\u7ED3\u675F\u4F1A\u8BDD\u300D",
+            "\u5728\u914D\u7F6E\u4E2D\u9002\u5F53\u7F29\u77ED\u91C7\u96C6\u95F4\u9694\u4EE5\u4FBF\u66F4\u5FEB\u5F97\u5230\u6570\u636E"
+          ]
+        }
+      ];
+      return {
+        sessionId,
+        label,
+        description,
+        startTime,
+        endTime,
+        duration: endTime - startTime,
+        environment,
+        summary: summary2,
+        anomalies,
+        suggestions: suggestions2,
+        eventMarks,
+        dataFile
+      };
+    }
     const summary = this.computeSummary(snapshots);
     const suggestions = this.generateSuggestions(snapshots, summary, anomalies);
     return {
@@ -671,6 +699,7 @@ var Analyzer = class {
       summary,
       anomalies,
       suggestions,
+      eventMarks,
       dataFile
     };
   }
@@ -707,6 +736,53 @@ var Analyzer = class {
     };
   }
   // ===== 私有方法 =====
+  emptySummary() {
+    const z = this.computeMetricSummary([]);
+    const stable = { slope: 0, r2: 0, direction: "stable", confidence: "low" };
+    return {
+      totalProcesses: { min: 0, max: 0, avg: 0 },
+      totalMemory: z,
+      byProcessType: {
+        browser: z,
+        renderer: [],
+        gpu: null,
+        utility: null
+      },
+      mainV8Heap: {
+        heapUsed: z,
+        heapTotal: z,
+        external: z,
+        arrayBuffers: z
+      },
+      trends: {
+        totalMemory: stable,
+        browserMemory: stable,
+        rendererMemory: stable
+      }
+    };
+  }
+  /** 从快照展平所有标记，并附上该采样点的分类内存（KB） */
+  collectEventMarks(snapshots) {
+    const out = [];
+    for (const s of snapshots) {
+      if (!s.marks?.length) continue;
+      const browserKB = s.processes.filter((p) => p.type === "Browser").reduce((sum, p) => sum + p.memory.workingSetSize, 0);
+      const rendererKB = s.processes.filter((p) => p.type === "Tab" && !p.isMonitorProcess).reduce((sum, p) => sum + p.memory.workingSetSize, 0);
+      const gpuKB = s.processes.filter((p) => p.type === "GPU").reduce((sum, p) => sum + p.memory.workingSetSize, 0);
+      for (const m of s.marks) {
+        out.push({
+          timestamp: m.timestamp,
+          label: m.label,
+          metadata: m.metadata,
+          totalWorkingSetKB: s.totalWorkingSetSize,
+          browserKB,
+          rendererKB,
+          gpuKB
+        });
+      }
+    }
+    return out;
+  }
   collectEnvironment() {
     const cpus2 = os2.cpus();
     return {
@@ -1494,6 +1570,30 @@ var DEFAULT_CONFIG = {
 };
 
 // src/core/monitor.ts
+function mergeMarksFromExcludedSnapshots(full, sampled) {
+  const marked = full.filter((s) => s.marks && s.marks.length > 0);
+  if (marked.length === 0) return sampled;
+  const sampledRefs = new Set(sampled);
+  const result = sampled.map((s) => ({
+    ...s,
+    marks: s.marks?.length ? [...s.marks] : void 0
+  }));
+  for (const src of marked) {
+    if (sampledRefs.has(src)) continue;
+    let bestIdx = 0;
+    let bestDiff = Infinity;
+    for (let i = 0; i < result.length; i++) {
+      const d = Math.abs(result[i].timestamp - src.timestamp);
+      if (d < bestDiff) {
+        bestDiff = d;
+        bestIdx = i;
+      }
+    }
+    const target = result[bestIdx];
+    target.marks = [...target.marks || [], ...src.marks];
+  }
+  return result;
+}
 function formatAutoSessionLabel(prefix) {
   const d = /* @__PURE__ */ new Date();
   const p2 = (n) => String(n).padStart(2, "0");
@@ -1648,7 +1748,6 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
       const session = this.sessionManager.getSession(sessionId);
       if (!session || !session.endTime) return null;
       const snapshots = this.persister.readSessionSnapshots(sessionId);
-      if (snapshots.length === 0) return null;
       return this.analyzer.generateReport(
         session.id,
         session.label,
@@ -1670,17 +1769,18 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
     if (endTime != null) {
       snapshots = snapshots.filter((s) => s.timestamp <= endTime);
     }
+    const beforeDownsample = snapshots;
     const limit = maxPoints ?? 600;
-    if (snapshots.length > limit) {
-      const step = snapshots.length / limit;
+    if (beforeDownsample.length > limit) {
+      const step = beforeDownsample.length / limit;
       const sampled = [];
       for (let i = 0; i < limit; i++) {
-        sampled.push(snapshots[Math.round(i * step)]);
+        sampled.push(beforeDownsample[Math.round(i * step)]);
       }
-      if (sampled[sampled.length - 1] !== snapshots[snapshots.length - 1]) {
-        sampled[sampled.length - 1] = snapshots[snapshots.length - 1];
+      if (sampled[sampled.length - 1] !== beforeDownsample[beforeDownsample.length - 1]) {
+        sampled[sampled.length - 1] = beforeDownsample[beforeDownsample.length - 1];
       }
-      snapshots = sampled;
+      snapshots = mergeMarksFromExcludedSnapshots(beforeDownsample, sampled);
     }
     return snapshots;
   }

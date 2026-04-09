@@ -38,9 +38,16 @@ const MonitorApp: React.FC = () => {
       </nav>
 
       <main className="monitor-main">
-        {currentPage === 'dashboard' && <Dashboard />}
-        {currentPage === 'report' && <Report />}
-        {currentPage === 'compare' && <Compare />}
+        {/* 各页均保持挂载，仅用 display 切换，避免丢失会话状态、IPC 与列表滚动位置 */}
+        <div style={{ display: currentPage === 'dashboard' ? 'block' : 'none' }}>
+          <Dashboard paneVisible={currentPage === 'dashboard'} />
+        </div>
+        <div style={{ display: currentPage === 'report' ? 'block' : 'none' }}>
+          <Report paneVisible={currentPage === 'report'} />
+        </div>
+        <div style={{ display: currentPage === 'compare' ? 'block' : 'none' }}>
+          <Compare paneVisible={currentPage === 'compare'} />
+        </div>
       </main>
     </div>
   )

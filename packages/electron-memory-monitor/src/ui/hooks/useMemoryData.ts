@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { MemorySnapshot } from '../../types/snapshot'
+import { eventMarksFromSnapshots } from '../utils/eventMarksFromSnapshots'
 import type { AnomalyEvent } from '../../types/anomaly'
 
 declare global {
@@ -69,6 +70,8 @@ export function useMemoryData() {
     setAnomalies([])
   }, [])
 
+  const markTimeline = useMemo(() => eventMarksFromSnapshots(snapshots), [snapshots])
+
   return {
     snapshots,
     latestSnapshot,
@@ -77,5 +80,6 @@ export function useMemoryData() {
     triggerGC,
     addMark,
     clearAnomalies,
+    markTimeline,
   }
 }

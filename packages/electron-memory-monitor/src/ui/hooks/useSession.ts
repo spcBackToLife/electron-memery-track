@@ -9,20 +9,17 @@ export function useSession() {
   const [sessions, setSessions] = useState<TestSession[]>([])
 
   const startSession = useCallback(async (label: string, description?: string) => {
-    const sessionId = await window.monitorAPI?.startSession(label, description)
-    if (sessionId) {
-      setCurrentSessionId(sessionId as string)
-      setIsRunning(true)
+    try {
+      const sessionId = await window.monitorAPI?.startSession(label, description)
+      if (sessionId) {
+        setCurrentSessionId(sessionId as string)
+        setIsRunning(true)
+      }
+      return sessionId
+    } catch (err) {
+      console.error('[@electron-memory/monitor] startSession failed:', err)
+      return null
     }
-    return sessionId
-  }, [])
-
-  const stopSession = useCallback(async () => {
-    const report = await window.monitorAPI?.stopSession()
-    setCurrentSessionId(null)
-    setIsRunning(false)
-    await refreshSessions()
-    return report as SessionReport | null
   }, [])
 
   const refreshSessions = useCallback(async () => {
@@ -36,6 +33,20 @@ export function useSession() {
     setCurrentSessionId(running?.id ?? null)
     setIsRunning(Boolean(running))
   }, [])
+
+  const stopSession = useCallback(async () => {
+    try {
+      const report = await window.monitorAPI?.stopSession()
+      setCurrentSessionId(null)
+      setIsRunning(false)
+      await refreshSessions()
+      return report as SessionReport | null
+    } catch (err) {
+      console.error('[@electron-memory/monitor] stopSession failed:', err)
+      await refreshSessions()
+      return null
+    }
+  }, [refreshSessions])
 
   const getSessionReport = useCallback(async (sessionId: string) => {
     return (await window.monitorAPI?.getSessionReport(sessionId)) as SessionReport | null

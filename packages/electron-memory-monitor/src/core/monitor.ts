@@ -23,6 +23,37 @@ import type { TestSession } from '../types/session'
 import type { AnomalyEvent } from '../types/anomaly'
 import type { SessionReport, CompareReport, GCResult } from '../types/report'
 
+/** 降采样后把被丢弃快照上的 marks 合并到时间最近的保留点，避免历史趋势图丢竖线 */
+function mergeMarksFromExcludedSnapshots(
+  full: MemorySnapshot[],
+  sampled: MemorySnapshot[]
+): MemorySnapshot[] {
+  const marked = full.filter((s) => s.marks && s.marks.length > 0)
+  if (marked.length === 0) return sampled
+
+  const sampledRefs = new Set(sampled)
+  const result = sampled.map((s) => ({
+    ...s,
+    marks: s.marks?.length ? [...s.marks] : undefined,
+  }))
+
+  for (const src of marked) {
+    if (sampledRefs.has(src)) continue
+    let bestIdx = 0
+    let bestDiff = Infinity
+    for (let i = 0; i < result.length; i++) {
+      const d = Math.abs(result[i].timestamp - src.timestamp)
+      if (d < bestDiff) {
+        bestDiff = d
+        bestIdx = i
+      }
+    }
+    const target = result[bestIdx]
+    target.marks = [...(target.marks || []), ...(src.marks!)]
+  }
+  return result
+}
+
 function formatAutoSessionLabel(prefix: string): string {
   const d = new Date()
   const p2 = (n: number) => String(n).padStart(2, '0')
@@ -254,7 +285,6 @@ export class ElectronMemoryMonitor extends EventEmitter {
       if (!session || !session.endTime) return null
 
       const snapshots = this.persister.readSessionSnapshots(sessionId)
-      if (snapshots.length === 0) return null
 
       return this.analyzer.generateReport(
         session.id,
@@ -286,19 +316,21 @@ export class ElectronMemoryMonitor extends EventEmitter {
       snapshots = snapshots.filter((s) => s.timestamp <= endTime)
     }
 
+    const beforeDownsample = snapshots
+
     // 降采样：如果数据点超过 maxPoints，均匀采样
     const limit = maxPoints ?? 600
-    if (snapshots.length > limit) {
-      const step = snapshots.length / limit
+    if (beforeDownsample.length > limit) {
+      const step = beforeDownsample.length / limit
       const sampled: MemorySnapshot[] = []
       for (let i = 0; i < limit; i++) {
-        sampled.push(snapshots[Math.round(i * step)])
+        sampled.push(beforeDownsample[Math.round(i * step)])
       }
       // 确保包含最后一个点
-      if (sampled[sampled.length - 1] !== snapshots[snapshots.length - 1]) {
-        sampled[sampled.length - 1] = snapshots[snapshots.length - 1]
+      if (sampled[sampled.length - 1] !== beforeDownsample[beforeDownsample.length - 1]) {
+        sampled[sampled.length - 1] = beforeDownsample[beforeDownsample.length - 1]
       }
-      snapshots = sampled
+      snapshots = mergeMarksFromExcludedSnapshots(beforeDownsample, sampled)
     }
 
     return snapshots

@@ -25,6 +25,7 @@ export type { TestSession, SessionIndex } from './types/session'
 export type { AnomalyEvent, AnomalySeverity, AnomalyCategory, AnomalyRule } from './types/anomaly'
 export type {
   SessionReport,
+  SessionEventMark,
   CompareReport,
   MetricSummary,
   TrendInfo,

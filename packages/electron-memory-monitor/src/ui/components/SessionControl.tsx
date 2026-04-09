@@ -4,9 +4,11 @@ interface SessionControlProps {
   isRunning: boolean
   currentSessionId: string | null
   onStart: (label: string, description?: string) => void
-  onStop: () => void
+  onStop: () => Promise<unknown> | void
   onTriggerGC: () => void
   onAddMark: (label: string) => void
+  /** 当前趋势缓冲区内已出现的标记条数（仅展示） */
+  markCount?: number
 }
 
 const SessionControl: React.FC<SessionControlProps> = ({
@@ -16,14 +18,25 @@ const SessionControl: React.FC<SessionControlProps> = ({
   onStop,
   onTriggerGC,
   onAddMark,
+  markCount = 0,
 }) => {
   const [label, setLabel] = useState('')
   const [markLabel, setMarkLabel] = useState('')
+  const [isStopping, setIsStopping] = useState(false)
 
   const handleStart = () => {
     if (label.trim()) {
       onStart(label.trim())
       setLabel('')
+    }
+  }
+
+  const handleStop = async () => {
+    setIsStopping(true)
+    try {
+      await onStop()
+    } finally {
+      setIsStopping(false)
     }
   }
 
@@ -56,8 +69,8 @@ const SessionControl: React.FC<SessionControlProps> = ({
             </button>
           </div>
         ) : (
-          <button className="btn btn-danger" onClick={onStop}>
-            ⏹ 结束会话
+          <button className="btn btn-danger" onClick={handleStop} disabled={isStopping}>
+            {isStopping ? '⏳ 结束中...' : '⏹ 结束会话'}
           </button>
         )}
 
@@ -77,6 +90,11 @@ const SessionControl: React.FC<SessionControlProps> = ({
             <button className="btn btn-secondary" onClick={handleMark} disabled={!markLabel.trim()}>
               📌 标记
             </button>
+            {markCount > 0 && (
+              <span className="mark-count-badge" title="当前图表缓冲区内已记录的标记数">
+                已记录 {markCount} 条
+              </span>
+            )}
           </div>
         </div>
       </div>

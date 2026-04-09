@@ -160,8 +160,14 @@ html, body {
   input { flex: 1; min-width: 200px; }
 }
 
-.session-tools { display: flex; gap: 8px; align-items: center; }
-.mark-form { display: flex; gap: 4px; }
+.session-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.mark-form {
+  display: flex; gap: 4px; align-items: center; flex-wrap: wrap;
+}
+.mark-count-badge {
+  font-size: 11px; color: @text-secondary; white-space: nowrap;
+  padding: 2px 8px; border-radius: @radius; background: rgba(250, 173, 20, 0.15); color: @warning-color;
+}
 
 // ===== 按钮 =====
 .btn {
@@ -413,6 +419,103 @@ select {
   th { color: @text-secondary; font-weight: 500; font-size: 12px; }
   .degraded { color: @danger-color; font-weight: 600; }
   .improved { color: @success-color; font-weight: 600; }
+}
+
+.report-marks-hint {
+  font-size: 12px; color: @text-secondary; margin: -4px 0 12px; line-height: 1.5;
+}
+
+.report-marks-table-wrap {
+  overflow-x: auto;
+  border: 1px solid @card-border;
+  border-radius: @radius;
+}
+
+.report-marks-table {
+  width: 100%; border-collapse: collapse; font-size: 12px;
+  th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid @card-border; }
+  th { color: @text-secondary; font-weight: 500; white-space: nowrap; }
+  .mark-label-cell { font-weight: 600; color: @warning-color; max-width: 200px; word-break: break-all; }
+  .mark-meta-cell {
+    font-family: ui-monospace, monospace; font-size: 11px; color: @text-secondary;
+    max-width: 280px; overflow: hidden; text-overflow: ellipsis;
+  }
+}
+
+.chart-marks-caption {
+  font-size: 11px; color: @text-secondary; margin: 0 0 8px;
+  code {
+    font-size: 10px; padding: 1px 5px; border-radius: 3px;
+    background: rgba(0, 0, 0, 0.35); color: @success-color; font-family: ui-monospace, monospace;
+  }
+}
+
+.dashboard-mark-explorer-section {
+  margin-top: 8px;
+}
+
+.mark-explorer-report-panel {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid @card-border;
+  h4 { font-size: 14px; margin-bottom: 10px; }
+}
+
+.mark-explorer {
+  border: 1px solid @card-border;
+  border-radius: @radius-lg;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mark-explorer-empty .mark-explorer-hint {
+  margin: 0; font-size: 12px; color: @text-secondary; line-height: 1.55;
+}
+
+.mark-explorer-toolbar {
+  display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; margin-bottom: 12px;
+}
+
+.mark-explorer-select-label {
+  display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: @text-secondary;
+  span { white-space: nowrap; }
+}
+
+.mark-explorer-select {
+  min-width: 280px; max-width: 100%;
+  padding: 6px 10px; border-radius: @radius; border: 1px solid @card-border;
+  background: @card-bg; color: @text-primary; font-size: 12px;
+}
+
+.mark-explorer-caption {
+  flex: 1; min-width: 200px; font-size: 11px; color: @text-secondary; line-height: 1.5;
+  strong { color: @text-primary; font-weight: 600; }
+}
+
+.mark-explorer-chart-wrap {
+  width: 100%; margin-bottom: 8px;
+}
+
+.mark-explorer-detail {
+  margin-top: 16px; padding-top: 14px; border-top: 1px solid @card-border;
+}
+
+.mark-explorer-detail-head {
+  margin-bottom: 12px;
+  h4 { font-size: 14px; margin: 0 0 6px; color: @warning-color; }
+}
+
+.mark-explorer-detail-meta {
+  margin: 0; font-size: 12px; color: @text-secondary; line-height: 1.45;
+}
+
+.mark-explorer-meta-json {
+  font-family: ui-monospace, monospace; font-size: 11px; opacity: 0.9;
+}
+
+.mark-explorer-process-section, .mark-explorer-v8-section {
+  margin-top: 12px;
+  h3 { font-size: 13px; }
 }
 
 .trend-grid { display: flex; flex-direction: column; gap: 8px; }

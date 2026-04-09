@@ -17,7 +17,11 @@ const formatBytes = (bytes: number): string => {
   return `${bytes} B`
 }
 
-const Compare: React.FC = () => {
+interface CompareProps {
+  paneVisible?: boolean
+}
+
+const Compare: React.FC<CompareProps> = ({ paneVisible = true }) => {
   const { sessions, refreshSessions, compareSessions } = useSession()
   const [baseId, setBaseId] = useState('')
   const [targetId, setTargetId] = useState('')
@@ -25,8 +29,8 @@ const Compare: React.FC = () => {
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    refreshSessions()
-  }, [refreshSessions])
+    if (paneVisible) void refreshSessions()
+  }, [paneVisible, refreshSessions])
 
   const handleCompare = async () => {
     if (!baseId || !targetId) return

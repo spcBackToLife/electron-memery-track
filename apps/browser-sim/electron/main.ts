@@ -312,6 +312,8 @@ ipcMain.handle(
       `自动测试: ${rounds} 轮, ${urls.length} 个URL, 打开间隔${openDelay}ms, 关闭间隔${closeDelay}ms`
     )
 
+    monitor.mark('autotest:start', { rounds, urlCount: urls.length, openDelay, closeDelay })
+
     try {
       for (let round = 0; round < rounds; round++) {
         if (signal.aborted) break
@@ -322,6 +324,8 @@ ipcMain.handle(
           totalRounds: rounds,
           phase: 'opening',
         })
+
+        monitor.mark(`autotest:r${round + 1}-before-open`, { round: round + 1, totalRounds: rounds })
 
         // 打开所有 URL
         const openedTabs: string[] = []
@@ -354,12 +358,19 @@ ipcMain.handle(
           }
         }
 
+        monitor.mark(`autotest:r${round + 1}-all-tabs-open`, {
+          round: round + 1,
+          openedCount: openedTabs.length,
+        })
+
         // 通知进入关闭阶段
         controlView?.webContents.send('browser:auto-test-progress', {
           round: round + 1,
           totalRounds: rounds,
           phase: 'closing',
         })
+
+        monitor.mark(`autotest:r${round + 1}-before-close`, { round: round + 1 })
 
         // 关闭刚才打开的所有标签页
         for (const tabId of openedTabs) {
@@ -379,13 +390,18 @@ ipcMain.handle(
             }
           }
         }
+
+        monitor.mark(`autotest:r${round + 1}-after-close`, { round: round + 1 })
       }
     } catch (err) {
       // abort or other error
     }
 
+    const autotestAborted = signal.aborted
     autoTestRunning = false
     autoTestAbortController = null
+
+    monitor.mark('autotest:stop', { aborted: autotestAborted })
 
     // 结束监控会话
     try {

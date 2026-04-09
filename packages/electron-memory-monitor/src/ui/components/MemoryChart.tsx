@@ -53,7 +53,6 @@ const MemoryChart: React.FC<MemoryChartProps> = ({ snapshots, height = 300 }) =>
         .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
 
       return {
-        time: formatTime(s.timestamp),
         timestamp: s.timestamp,
         total: Math.round(s.totalWorkingSetSize / 1024 * 10) / 10,
         browser: Math.round(browserMem / 1024 * 10) / 10,
@@ -77,15 +76,20 @@ const MemoryChart: React.FC<MemoryChartProps> = ({ snapshots, height = 300 }) =>
     return <div className="chart-empty">等待数据采集...</div>
   }
 
+  const tMin = chartData[0]?.timestamp ?? 0
+  const tMax = chartData[chartData.length - 1]?.timestamp ?? 0
+
   return (
     <ResponsiveContainer width="100%" height={height}>
       <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
         <XAxis
-          dataKey="time"
+          type="number"
+          dataKey="timestamp"
+          domain={[tMin, tMax]}
           stroke="rgba(255,255,255,0.5)"
           fontSize={12}
-          interval="preserveStartEnd"
+          tickFormatter={(ts: number) => formatTime(ts)}
         />
         <YAxis
           stroke="rgba(255,255,255,0.5)"
@@ -99,6 +103,7 @@ const MemoryChart: React.FC<MemoryChartProps> = ({ snapshots, height = 300 }) =>
             borderRadius: 8,
             color: '#e0e0e0',
           }}
+          labelFormatter={(ts) => formatTime(Number(ts))}
           formatter={(value: number, name: string) => [`${value.toFixed(1)} MB`, name]}
         />
         <Legend />
@@ -110,10 +115,11 @@ const MemoryChart: React.FC<MemoryChartProps> = ({ snapshots, height = 300 }) =>
 
         {marks.map((mark, idx) => (
           <ReferenceLine
-            key={idx}
-            x={formatTime(mark.timestamp)}
+            key={`${mark.timestamp}-${idx}-${mark.label}`}
+            x={mark.timestamp}
             stroke="#faad14"
             strokeDasharray="3 3"
+            strokeWidth={1.5}
             label={{ value: mark.label, position: 'top', fill: '#faad14', fontSize: 10 }}
           />
         ))}
