@@ -6,8 +6,10 @@
  */
 
 import { BrowserWindow } from 'electron'
-import * as path from 'path'
+import * as path from 'node:path'
 import type { MonitorConfig } from '../types/config'
+import { ensureDashboardProtocolHandler, getDashboardPageURL } from './dashboard-protocol'
+import { attachDashboardWindowHooks } from './dashboard-window-hooks'
 
 export class DashboardManager {
   private config: MonitorConfig
@@ -49,12 +51,18 @@ export class DashboardManager {
         preload: preloadPath,
         contextIsolation: true,
         nodeIntegration: false,
+        devTools: true,
       },
     })
 
-    // 加载面板 UI
-    const uiPath = path.join(__dirname, 'ui', 'index.html')
-    this.window.loadFile(uiPath)
+    attachDashboardWindowHooks(this.window, {
+      openDevToolsOnStart: this.config.dashboard.openDevToolsOnStart,
+    })
+
+    // 通过自定义协议加载 UI（避免 file:// + ESM 在打包/asar 下白屏）
+    const uiRoot = path.join(__dirname, 'ui')
+    ensureDashboardProtocolHandler(uiRoot)
+    this.window.loadURL(getDashboardPageURL())
 
     this.window.on('closed', () => {
       this.window = null

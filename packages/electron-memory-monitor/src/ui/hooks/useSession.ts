@@ -27,9 +27,14 @@ export function useSession() {
 
   const refreshSessions = useCallback(async () => {
     const list = await window.monitorAPI?.getSessions()
-    if (list) {
-      setSessions(list as TestSession[])
+    if (!list) {
+      return
     }
+    const arr = list as TestSession[]
+    setSessions(arr)
+    const running = arr.find(s => s.status === 'running')
+    setCurrentSessionId(running?.id ?? null)
+    setIsRunning(Boolean(running))
   }, [])
 
   const getSessionReport = useCallback(async (sessionId: string) => {

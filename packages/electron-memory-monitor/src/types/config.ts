@@ -13,6 +13,19 @@ export interface MonitorConfig {
   /** 启动后是否自动打开监控面板，默认 true */
   openDashboardOnStart: boolean
 
+  // ===== 会话（落盘报告）=====
+  session: {
+    /**
+     * 监控启动后自动创建一条「进行中」会话并开始写入快照，无需在看板点「开始会话」。
+     * 每次进程启动一条新会话，标签带本地时间。默认 true。
+     */
+    autoStartOnLaunch: boolean
+    /** 自动会话标签前缀，完整标签为 `${prefix} YYYY-MM-DD HH:mm:ss` */
+    autoLabelPrefix: string
+    /** 自动会话描述，可选 */
+    autoDescription?: string
+  }
+
   // ===== 采集配置 =====
   /** 采集间隔 (ms)，默认 2000 */
   collectInterval: number
@@ -51,6 +64,8 @@ export interface MonitorConfig {
     height: number
     /** 是否置顶，默认 false */
     alwaysOnTop: boolean
+    /** 打开看板时是否自动打开 DevTools，默认 false；为 true 或环境变量 LAUNCHER_MEMORY_MONITOR_DEVTOOLS=1 时开启 */
+    openDevToolsOnStart: boolean
   }
 
   // ===== 进程标注 =====
@@ -63,6 +78,11 @@ export const DEFAULT_CONFIG: MonitorConfig = {
   enabled: true,
   autoStart: true,
   openDashboardOnStart: true,
+
+  session: {
+    autoStartOnLaunch: true,
+    autoLabelPrefix: '自动会话',
+  },
 
   collectInterval: 2000,
   persistInterval: 60,
@@ -85,6 +105,7 @@ export const DEFAULT_CONFIG: MonitorConfig = {
     width: 1400,
     height: 900,
     alwaysOnTop: false,
+    openDevToolsOnStart: false,
   },
 
   processLabels: {},

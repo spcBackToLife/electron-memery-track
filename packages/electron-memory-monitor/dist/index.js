@@ -31,13 +31,14 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 var src_exports = {};
 __export(src_exports, {
   ElectronMemoryMonitor: () => ElectronMemoryMonitor,
-  IPC_CHANNELS: () => IPC_CHANNELS
+  IPC_CHANNELS: () => IPC_CHANNELS,
+  registerDashboardSchemePrivileged: () => registerDashboardSchemePrivileged
 });
 module.exports = __toCommonJS(src_exports);
 
 // src/core/monitor.ts
-var import_electron4 = require("electron");
-var path3 = __toESM(require("path"));
+var import_electron5 = require("electron");
+var path4 = __toESM(require("path"));
 var v82 = __toESM(require("v8"));
 var import_events3 = require("events");
 
@@ -1106,8 +1107,229 @@ var Analyzer = class {
 };
 
 // src/core/dashboard.ts
+var import_electron3 = require("electron");
+var path3 = __toESM(require("path"));
+
+// src/core/dashboard-protocol.ts
 var import_electron2 = require("electron");
+var import_promises = require("fs/promises");
 var path2 = __toESM(require("path"));
+var import_node_url = require("url");
+var SCHEME = "emm-dashboard";
+var privilegedRegistered = false;
+var handlerRegistered = false;
+var MIME_BY_EXT = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json",
+  ".map": "application/json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".txt": "text/plain; charset=utf-8"
+};
+function isPathInsideRoot(filePath, root) {
+  const f = path2.resolve(filePath);
+  const r = path2.resolve(root);
+  if (f === r) {
+    return true;
+  }
+  const rel = path2.relative(r, f);
+  if (!rel || rel.startsWith("..") || path2.isAbsolute(rel)) {
+    return false;
+  }
+  return true;
+}
+function urlToUiRelativePath(requestUrl) {
+  let u;
+  try {
+    u = new URL(requestUrl);
+  } catch {
+    return "";
+  }
+  let p = "";
+  try {
+    p = decodeURIComponent(u.pathname || "");
+  } catch {
+    p = u.pathname || "";
+  }
+  p = p.replace(/^\/+/, "");
+  const host = (u.hostname || "").toLowerCase();
+  if (p.includes("..")) {
+    return "";
+  }
+  if (host === "electron" || host === "") {
+    return p || "index.html";
+  }
+  if (p) {
+    return `${host}/${p}`.replace(/\\/g, "/");
+  }
+  if (host.includes(".")) {
+    return host;
+  }
+  return "index.html";
+}
+function bufferToResponseBody(buf) {
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+}
+function looksLikeHtml(buf) {
+  let i = 0;
+  if (buf.length >= 3 && buf[0] === 239 && buf[1] === 187 && buf[2] === 191) {
+    i = 3;
+  }
+  while (i < buf.length && (buf[i] === 32 || buf[i] === 9 || buf[i] === 10 || buf[i] === 13)) {
+    i += 1;
+  }
+  return i < buf.length && buf[i] === 60;
+}
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "*"
+  };
+}
+function registerDashboardSchemePrivileged() {
+  if (privilegedRegistered) {
+    return;
+  }
+  privilegedRegistered = true;
+  import_electron2.protocol.registerSchemesAsPrivileged([
+    {
+      scheme: SCHEME,
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        corsEnabled: true,
+        stream: true
+      }
+    }
+  ]);
+}
+function ensureDashboardProtocolHandler(uiRoot) {
+  if (handlerRegistered) {
+    return;
+  }
+  if (!import_electron2.app.isReady()) {
+    throw new Error(
+      "[@electron-memory/monitor] ensureDashboardProtocolHandler: app must be ready before opening dashboard"
+    );
+  }
+  handlerRegistered = true;
+  const base = path2.resolve(uiRoot);
+  import_electron2.protocol.handle(SCHEME, async (request) => {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+    try {
+      const rel = urlToUiRelativePath(request.url);
+      if (!rel || rel.includes("..")) {
+        return new Response("Bad path", { status: 400, headers: corsHeaders() });
+      }
+      const filePath = path2.resolve(path2.join(base, ...rel.split("/")));
+      if (!isPathInsideRoot(filePath, base)) {
+        return new Response("Forbidden", { status: 403, headers: corsHeaders() });
+      }
+      const fileUrl = (0, import_node_url.pathToFileURL)(filePath).href;
+      let upstream;
+      try {
+        upstream = await import_electron2.net.fetch(fileUrl);
+      } catch {
+        upstream = new Response(null, { status: 599 });
+      }
+      let buf;
+      if (!upstream.ok) {
+        buf = await (0, import_promises.readFile)(filePath);
+      } else {
+        const ab = await upstream.arrayBuffer();
+        buf = Buffer.from(ab);
+      }
+      const ext = path2.extname(filePath).toLowerCase();
+      if (ext === ".html" && !looksLikeHtml(buf)) {
+        console.error(
+          "[@electron-memory/monitor] emm-dashboard: not HTML at",
+          filePath,
+          "url=",
+          request.url
+        );
+        return new Response("Invalid dashboard HTML", { status: 500, headers: corsHeaders() });
+      }
+      const mime = MIME_BY_EXT[ext] || "application/octet-stream";
+      return new Response(bufferToResponseBody(buf), {
+        status: 200,
+        headers: {
+          "Content-Type": mime,
+          "Cache-Control": "no-store",
+          ...corsHeaders()
+        }
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[@electron-memory/monitor] emm-dashboard:", request.url, err);
+      return new Response(msg, { status: 404, headers: corsHeaders() });
+    }
+  });
+}
+function getDashboardPageURL() {
+  return `${SCHEME}://electron/index.html`;
+}
+
+// src/core/dashboard-window-hooks.ts
+function shouldOpenDevToolsShortcut(input) {
+  if (input.type !== "keyDown") {
+    return false;
+  }
+  if (input.key === "F12") {
+    return true;
+  }
+  const k = input.key.toLowerCase();
+  if (k !== "i") {
+    return false;
+  }
+  if (input.control && input.shift) {
+    return true;
+  }
+  if (process.platform === "darwin" && input.meta && input.alt) {
+    return true;
+  }
+  return false;
+}
+function attachDashboardWindowHooks(win, options) {
+  const wc = win.webContents;
+  wc.on("before-input-event", (event, input) => {
+    if (!shouldOpenDevToolsShortcut(input)) {
+      return;
+    }
+    event.preventDefault();
+    if (wc.isDevToolsOpened()) {
+      wc.closeDevTools();
+    } else {
+      wc.openDevTools({ mode: "detach" });
+    }
+  });
+  wc.on("did-fail-load", (_e, code, desc, url) => {
+    console.error("[@electron-memory/monitor] dashboard did-fail-load", code, desc, url);
+  });
+  let autoOpened = false;
+  wc.on("did-finish-load", () => {
+    if (options.openDevToolsOnStart && !autoOpened) {
+      autoOpened = true;
+      wc.openDevTools({ mode: "detach" });
+    }
+  });
+}
+
+// src/core/dashboard.ts
 var DashboardManager = class {
   constructor(config) {
     this.window = null;
@@ -1130,8 +1352,8 @@ var DashboardManager = class {
       this.window.focus();
       return;
     }
-    const preloadPath = path2.join(__dirname, "dashboard-preload.js");
-    this.window = new import_electron2.BrowserWindow({
+    const preloadPath = path3.join(__dirname, "dashboard-preload.js");
+    this.window = new import_electron3.BrowserWindow({
       width: this.config.dashboard.width,
       height: this.config.dashboard.height,
       title: "Electron Memory Monitor",
@@ -1139,11 +1361,16 @@ var DashboardManager = class {
       webPreferences: {
         preload: preloadPath,
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        devTools: true
       }
     });
-    const uiPath = path2.join(__dirname, "ui", "index.html");
-    this.window.loadFile(uiPath);
+    attachDashboardWindowHooks(this.window, {
+      openDevToolsOnStart: this.config.dashboard.openDevToolsOnStart
+    });
+    const uiRoot = path3.join(__dirname, "ui");
+    ensureDashboardProtocolHandler(uiRoot);
+    this.window.loadURL(getDashboardPageURL());
     this.window.on("closed", () => {
       this.window = null;
     });
@@ -1165,7 +1392,7 @@ var DashboardManager = class {
 };
 
 // src/ipc/main-handler.ts
-var import_electron3 = require("electron");
+var import_electron4 = require("electron");
 
 // src/ipc/channels.ts
 var IPC_CHANNELS = {
@@ -1203,49 +1430,49 @@ var IPCMainHandler = class {
   }
   /** 注册所有 IPC handlers */
   register() {
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_START, (_event, args) => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_START, (_event, args) => {
       return this.monitor.startSession(args.label, args.description);
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_STOP, async () => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_STOP, async () => {
       return this.monitor.stopSession();
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => {
       return this.monitor.getSessions();
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_REPORT, async (_event, sessionId) => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_REPORT, async (_event, sessionId) => {
       return this.monitor.getSessionReport(sessionId);
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_COMPARE, async (_event, args) => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_COMPARE, async (_event, args) => {
       return this.monitor.compareSessions(args.baseId, args.targetId);
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_SNAPSHOTS, async (_event, args) => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_SNAPSHOTS, async (_event, args) => {
       return this.monitor.getSessionSnapshots(args.sessionId, args.startTime, args.endTime, args.maxPoints);
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.TRIGGER_GC, async () => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.TRIGGER_GC, async () => {
       return this.monitor.triggerGC();
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.HEAP_SNAPSHOT, async (_event, filePath) => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.HEAP_SNAPSHOT, async (_event, filePath) => {
       return this.monitor.takeHeapSnapshot(filePath);
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.MARK, (_event, args) => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.MARK, (_event, args) => {
       this.monitor.mark(args.label, args.metadata);
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.GET_CONFIG, () => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.GET_CONFIG, () => {
       return this.monitor.getConfig();
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.GET_SESSIONS, async () => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.GET_SESSIONS, async () => {
       return this.monitor.getSessions();
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_EXPORT, async (_event, sessionId) => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_EXPORT, async (_event, sessionId) => {
       return this.monitor.exportSession(sessionId);
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_IMPORT, async () => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_IMPORT, async () => {
       return this.monitor.importSession();
     });
-    import_electron3.ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, sessionId) => {
+    import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, sessionId) => {
       return this.monitor.deleteSession(sessionId);
     });
-    import_electron3.ipcMain.on(IPC_CHANNELS.RENDERER_REPORT, (_event, detail) => {
+    import_electron4.ipcMain.on(IPC_CHANNELS.RENDERER_REPORT, (_event, detail) => {
       this.monitor.updateRendererDetail(detail);
     });
   }
@@ -1265,8 +1492,8 @@ var IPCMainHandler = class {
   unregister() {
     const channels = Object.values(IPC_CHANNELS);
     for (const channel of channels) {
-      import_electron3.ipcMain.removeHandler(channel);
-      import_electron3.ipcMain.removeAllListeners(channel);
+      import_electron4.ipcMain.removeHandler(channel);
+      import_electron4.ipcMain.removeAllListeners(channel);
     }
   }
 };
@@ -1276,6 +1503,10 @@ var DEFAULT_CONFIG = {
   enabled: true,
   autoStart: true,
   openDashboardOnStart: true,
+  session: {
+    autoStartOnLaunch: true,
+    autoLabelPrefix: "\u81EA\u52A8\u4F1A\u8BDD"
+  },
   collectInterval: 2e3,
   persistInterval: 60,
   enableRendererDetail: false,
@@ -1294,12 +1525,19 @@ var DEFAULT_CONFIG = {
   dashboard: {
     width: 1400,
     height: 900,
-    alwaysOnTop: false
+    alwaysOnTop: false,
+    openDevToolsOnStart: false
   },
   processLabels: {}
 };
 
 // src/core/monitor.ts
+function formatAutoSessionLabel(prefix) {
+  const d = /* @__PURE__ */ new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+  return `${prefix || "\u81EA\u52A8\u4F1A\u8BDD"} ${stamp}`;
+}
 var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
   constructor(config) {
     super();
@@ -1313,6 +1551,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
       this.dashboard = null;
       return;
     }
+    registerDashboardSchemePrivileged();
     this.collector = new MemoryCollector(this.config);
     this.anomalyDetector = new AnomalyDetector(this.config);
     this.analyzer = new Analyzer();
@@ -1325,10 +1564,10 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
   /** 启动监控 */
   async start() {
     if (!this.config.enabled || this.started) return;
-    if (!import_electron4.app.isReady()) {
-      await import_electron4.app.whenReady();
+    if (!import_electron5.app.isReady()) {
+      await import_electron5.app.whenReady();
     }
-    const storageDir = this.config.storage.directory || path3.join(import_electron4.app.getPath("userData"), "memory-monitor");
+    const storageDir = this.config.storage.directory || path4.join(import_electron5.app.getPath("userData"), "memory-monitor");
     this.persister = new DataPersister(this.config, storageDir);
     this.sessionManager = new SessionManager(this.persister);
     this.ipcHandler = new IPCMainHandler(this);
@@ -1342,11 +1581,19 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
     });
     this.collector.start();
     this.anomalyDetector.start();
+    this.persister.cleanOldSessions();
+    this.started = true;
+    if (this.config.session.autoStartOnLaunch) {
+      try {
+        const label = formatAutoSessionLabel(this.config.session.autoLabelPrefix);
+        this.startSession(label, this.config.session.autoDescription);
+      } catch (err) {
+        console.error("[@electron-memory/monitor] autoStartOnLaunch failed:", err);
+      }
+    }
     if (this.config.openDashboardOnStart) {
       this.openDashboard();
     }
-    this.persister.cleanOldSessions();
-    this.started = true;
   }
   /** 停止监控 */
   async stop() {
@@ -1378,6 +1625,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
     const session = this.sessionManager.startSession(label, description);
     this.collector.setSessionId(session.id);
     this.anomalyDetector.clearAnomalies();
+    this.emit("session-start", session);
     return session.id;
   }
   /** 结束当前会话 */
@@ -1400,7 +1648,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
       anomalies,
       completedSession.dataFile
     );
-    const reportPath = path3.join(this.persister.getStorageDir(), completedSession.id, "report.json");
+    const reportPath = path4.join(this.persister.getStorageDir(), completedSession.id, "report.json");
     const fs2 = await import("fs");
     fs2.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf-8");
     this.emit("session-end", report);
@@ -1430,7 +1678,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
   /** 获取指定会话报告 */
   async getSessionReport(sessionId) {
     const fs2 = await import("fs");
-    const reportPath = path3.join(this.persister.getStorageDir(), sessionId, "report.json");
+    const reportPath = path4.join(this.persister.getStorageDir(), sessionId, "report.json");
     try {
       const content = fs2.readFileSync(reportPath, "utf-8");
       return JSON.parse(content);
@@ -1561,7 +1809,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
       } catch {
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve2) => setTimeout(resolve2, 100));
     const afterMem = process.memoryUsage();
     const freed = beforeMem.heapUsed - afterMem.heapUsed;
     return {
@@ -1574,7 +1822,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
   }
   /** 导出堆快照 */
   async takeHeapSnapshot(filePath) {
-    const snapshotPath = filePath || path3.join(
+    const snapshotPath = filePath || path4.join(
       this.persister.getStorageDir(),
       `heap-${Date.now()}.heapsnapshot`
     );
@@ -1609,10 +1857,22 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
     this.emit("snapshot", snapshot);
   }
   mergeConfig(userConfig) {
-    if (!userConfig) return { ...DEFAULT_CONFIG };
+    if (!userConfig) {
+      return {
+        ...DEFAULT_CONFIG,
+        dashboard: {
+          ...DEFAULT_CONFIG.dashboard,
+          openDevToolsOnStart: process.env.LAUNCHER_MEMORY_MONITOR_DEVTOOLS === "1"
+        }
+      };
+    }
     return {
       ...DEFAULT_CONFIG,
       ...userConfig,
+      session: {
+        ...DEFAULT_CONFIG.session,
+        ...userConfig.session || {}
+      },
       anomaly: {
         ...DEFAULT_CONFIG.anomaly,
         ...userConfig.anomaly || {}
@@ -1623,7 +1883,8 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
       },
       dashboard: {
         ...DEFAULT_CONFIG.dashboard,
-        ...userConfig.dashboard || {}
+        ...userConfig.dashboard || {},
+        openDevToolsOnStart: userConfig.dashboard?.openDevToolsOnStart !== void 0 ? userConfig.dashboard.openDevToolsOnStart : process.env.LAUNCHER_MEMORY_MONITOR_DEVTOOLS === "1"
       },
       processLabels: {
         ...DEFAULT_CONFIG.processLabels,
@@ -1635,6 +1896,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   ElectronMemoryMonitor,
-  IPC_CHANNELS
+  IPC_CHANNELS,
+  registerDashboardSchemePrivileged
 });
 //# sourceMappingURL=index.js.map

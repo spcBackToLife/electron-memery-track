@@ -11,7 +11,16 @@ import react from '@vitejs/plugin-react'
 import path from 'path'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    // 去掉 crossorigin：在 emm-dashboard 等自定义协议下会触发 CORS，协议响应若未带 ACAO 则 module 脚本不执行
+    {
+      name: 'strip-index-crossorigin',
+      transformIndexHtml(html) {
+        return html.replace(/\s+crossorigin(?:="[^"]*")?/g, '')
+      },
+    },
+  ],
 
   // 使用相对路径，因为面板通过 file:// 协议加载
   base: './',

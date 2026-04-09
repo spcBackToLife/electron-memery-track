@@ -175,6 +175,17 @@ interface MonitorConfig {
     autoStart: boolean;
     /** 启动后是否自动打开监控面板，默认 true */
     openDashboardOnStart: boolean;
+    session: {
+        /**
+         * 监控启动后自动创建一条「进行中」会话并开始写入快照，无需在看板点「开始会话」。
+         * 每次进程启动一条新会话，标签带本地时间。默认 true。
+         */
+        autoStartOnLaunch: boolean;
+        /** 自动会话标签前缀，完整标签为 `${prefix} YYYY-MM-DD HH:mm:ss` */
+        autoLabelPrefix: string;
+        /** 自动会话描述，可选 */
+        autoDescription?: string;
+    };
     /** 采集间隔 (ms)，默认 2000 */
     collectInterval: number;
     /** 落盘间隔 (条数)，默认 60 */
@@ -206,6 +217,8 @@ interface MonitorConfig {
         height: number;
         /** 是否置顶，默认 false */
         alwaysOnTop: boolean;
+        /** 打开看板时是否自动打开 DevTools，默认 false；为 true 或环境变量 LAUNCHER_MEMORY_MONITOR_DEVTOOLS=1 时开启 */
+        openDevToolsOnStart: boolean;
     };
     /** 给窗口进程打标签，方便识别 */
     processLabels: Record<string, string>;
@@ -476,10 +489,17 @@ declare class ElectronMemoryMonitor extends EventEmitter {
     getConfig(): MonitorConfig;
     on(event: 'snapshot', handler: (data: MemorySnapshot) => void): this;
     on(event: 'anomaly', handler: (event: AnomalyEvent) => void): this;
+    on(event: 'session-start', handler: (session: TestSession) => void): this;
     on(event: 'session-end', handler: (report: SessionReport) => void): this;
     private onSnapshot;
     private mergeConfig;
 }
+
+/**
+ * 必须在 app.on('ready') 之前调用（与 new ElectronMemoryMonitor 同文件顶部或更早）。
+ * 由 ElectronMemoryMonitor 在启用时于构造函数内调用。
+ */
+declare function registerDashboardSchemePrivileged(): void;
 
 /**
  * IPC 通道常量定义
@@ -507,4 +527,4 @@ declare const IPC_CHANNELS: {
     readonly RENDERER_REQUEST: "emm:renderer:request";
 };
 
-export { type AnomalyCategory, type AnomalyEvent, type AnomalyRule, type AnomalySeverity, type CompareReport, ElectronMemoryMonitor, type EventMark, type GCResult, IPC_CHANNELS, type Improvement, type MemorySnapshot, type MetricDiff, type MetricSummary, type MonitorConfig, type ProcessMemoryInfo, type Regression, type RendererV8Detail, type SessionIndex, type SessionReport, type Suggestion, type SystemMemoryInfo, type TestSession, type TrendInfo, type V8HeapDetailStats, type V8HeapSpaceInfo, type V8HeapStats };
+export { type AnomalyCategory, type AnomalyEvent, type AnomalyRule, type AnomalySeverity, type CompareReport, ElectronMemoryMonitor, type EventMark, type GCResult, IPC_CHANNELS, type Improvement, type MemorySnapshot, type MetricDiff, type MetricSummary, type MonitorConfig, type ProcessMemoryInfo, type Regression, type RendererV8Detail, type SessionIndex, type SessionReport, type Suggestion, type SystemMemoryInfo, type TestSession, type TrendInfo, type V8HeapDetailStats, type V8HeapSpaceInfo, type V8HeapStats, registerDashboardSchemePrivileged };

@@ -6,6 +6,8 @@
  */
 
 export { ElectronMemoryMonitor } from './core/monitor'
+/** 若延迟到 app.ready 之后才 new ElectronMemoryMonitor，请在本文件最顶部先调用此函数 */
+export { registerDashboardSchemePrivileged } from './core/dashboard-protocol'
 
 // 类型导出
 export type { MonitorConfig } from './types/config'

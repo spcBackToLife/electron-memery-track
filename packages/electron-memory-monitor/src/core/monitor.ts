@@ -6,7 +6,7 @@
  */
 
 import { app } from 'electron'
-import * as path from 'path'
+import * as path from 'node:path'
 import * as v8 from 'v8'
 import { EventEmitter } from 'events'
 import { MemoryCollector } from './collector'
@@ -15,12 +15,20 @@ import { SessionManager } from './session'
 import { AnomalyDetector } from './anomaly'
 import { Analyzer } from './analyzer'
 import { DashboardManager } from './dashboard'
+import { registerDashboardSchemePrivileged } from './dashboard-protocol'
 import { IPCMainHandler } from '../ipc/main-handler'
 import { DEFAULT_CONFIG, type MonitorConfig } from '../types/config'
 import type { MemorySnapshot, RendererV8Detail } from '../types/snapshot'
 import type { TestSession } from '../types/session'
 import type { AnomalyEvent } from '../types/anomaly'
 import type { SessionReport, CompareReport, GCResult } from '../types/report'
+
+function formatAutoSessionLabel(prefix: string): string {
+  const d = new Date()
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+  return `${prefix || '自动会话'} ${stamp}`
+}
 
 export class ElectronMemoryMonitor extends EventEmitter {
   private config: MonitorConfig
@@ -48,6 +56,9 @@ export class ElectronMemoryMonitor extends EventEmitter {
       this.dashboard = null as unknown as DashboardManager
       return
     }
+
+    // 必须在 app ready 之前注册自定义协议（与 loadFile 相比的第一性原理修复）
+    registerDashboardSchemePrivileged()
 
     // 初始化各模块
     this.collector = new MemoryCollector(this.config)
@@ -98,15 +109,25 @@ export class ElectronMemoryMonitor extends EventEmitter {
     // 启动异常检测
     this.anomalyDetector.start()
 
-    // 打开监控面板
-    if (this.config.openDashboardOnStart) {
-      this.openDashboard()
-    }
-
     // 清理过期会话
     this.persister.cleanOldSessions()
 
     this.started = true
+
+    // 自动开始会话（每次启动一条带时间戳的报告，无需在看板点「开始会话」）
+    if (this.config.session.autoStartOnLaunch) {
+      try {
+        const label = formatAutoSessionLabel(this.config.session.autoLabelPrefix)
+        this.startSession(label, this.config.session.autoDescription)
+      }
+      catch (err) {
+        console.error('[@electron-memory/monitor] autoStartOnLaunch failed:', err)
+      }
+    }
+
+    if (this.config.openDashboardOnStart) {
+      this.openDashboard()
+    }
   }
 
   /** 停止监控 */
@@ -147,6 +168,8 @@ export class ElectronMemoryMonitor extends EventEmitter {
     const session = this.sessionManager.startSession(label, description)
     this.collector.setSessionId(session.id)
     this.anomalyDetector.clearAnomalies()
+
+    this.emit('session-start', session)
 
     return session.id
   }
@@ -434,6 +457,7 @@ export class ElectronMemoryMonitor extends EventEmitter {
 
   on(event: 'snapshot', handler: (data: MemorySnapshot) => void): this
   on(event: 'anomaly', handler: (event: AnomalyEvent) => void): this
+  on(event: 'session-start', handler: (session: TestSession) => void): this
   on(event: 'session-end', handler: (report: SessionReport) => void): this
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(event: string | symbol, handler: (...args: any[]) => void): this {
@@ -462,11 +486,23 @@ export class ElectronMemoryMonitor extends EventEmitter {
   }
 
   private mergeConfig(userConfig?: Partial<MonitorConfig>): MonitorConfig {
-    if (!userConfig) return { ...DEFAULT_CONFIG }
+    if (!userConfig) {
+      return {
+        ...DEFAULT_CONFIG,
+        dashboard: {
+          ...DEFAULT_CONFIG.dashboard,
+          openDevToolsOnStart: process.env.LAUNCHER_MEMORY_MONITOR_DEVTOOLS === '1',
+        },
+      }
+    }
 
     return {
       ...DEFAULT_CONFIG,
       ...userConfig,
+      session: {
+        ...DEFAULT_CONFIG.session,
+        ...(userConfig.session || {}),
+      },
       anomaly: {
         ...DEFAULT_CONFIG.anomaly,
         ...(userConfig.anomaly || {}),
@@ -478,6 +514,10 @@ export class ElectronMemoryMonitor extends EventEmitter {
       dashboard: {
         ...DEFAULT_CONFIG.dashboard,
         ...(userConfig.dashboard || {}),
+        openDevToolsOnStart:
+          userConfig.dashboard?.openDevToolsOnStart !== undefined
+            ? userConfig.dashboard.openDevToolsOnStart
+            : process.env.LAUNCHER_MEMORY_MONITOR_DEVTOOLS === '1',
       },
       processLabels: {
         ...DEFAULT_CONFIG.processLabels,

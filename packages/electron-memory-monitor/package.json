@@ -1,6 +1,6 @@
 {
   "name": "@electron-memory/monitor",
-  "version": "0.1.0",
+  "version": "0.2.4",
   "description": "Electron memory profiling SDK - zero-intrusion memory monitoring, anomaly detection, and regression analysis",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

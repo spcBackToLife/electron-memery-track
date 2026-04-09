@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import MetricCard from '../components/MetricCard'
 import ProcessTable from '../components/ProcessTable'
 import MemoryChart from '../components/MemoryChart'
@@ -41,7 +41,12 @@ const Dashboard: React.FC = () => {
     isRunning,
     startSession,
     stopSession,
+    refreshSessions,
   } = useSession()
+
+  useEffect(() => {
+    void refreshSessions()
+  }, [refreshSessions])
 
   if (!latestSnapshot) {
     return (

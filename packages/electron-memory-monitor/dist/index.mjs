@@ -1,6 +1,6 @@
 // src/core/monitor.ts
-import { app as app2 } from "electron";
-import * as path3 from "path";
+import { app as app3 } from "electron";
+import * as path4 from "path";
 import * as v82 from "v8";
 import { EventEmitter as EventEmitter3 } from "events";
 
@@ -1070,7 +1070,228 @@ var Analyzer = class {
 
 // src/core/dashboard.ts
 import { BrowserWindow as BrowserWindow2 } from "electron";
+import * as path3 from "path";
+
+// src/core/dashboard-protocol.ts
+import { app as app2, net, protocol } from "electron";
+import { readFile } from "fs/promises";
 import * as path2 from "path";
+import { pathToFileURL } from "url";
+var SCHEME = "emm-dashboard";
+var privilegedRegistered = false;
+var handlerRegistered = false;
+var MIME_BY_EXT = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json",
+  ".map": "application/json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".ttf": "font/ttf",
+  ".txt": "text/plain; charset=utf-8"
+};
+function isPathInsideRoot(filePath, root) {
+  const f = path2.resolve(filePath);
+  const r = path2.resolve(root);
+  if (f === r) {
+    return true;
+  }
+  const rel = path2.relative(r, f);
+  if (!rel || rel.startsWith("..") || path2.isAbsolute(rel)) {
+    return false;
+  }
+  return true;
+}
+function urlToUiRelativePath(requestUrl) {
+  let u;
+  try {
+    u = new URL(requestUrl);
+  } catch {
+    return "";
+  }
+  let p = "";
+  try {
+    p = decodeURIComponent(u.pathname || "");
+  } catch {
+    p = u.pathname || "";
+  }
+  p = p.replace(/^\/+/, "");
+  const host = (u.hostname || "").toLowerCase();
+  if (p.includes("..")) {
+    return "";
+  }
+  if (host === "electron" || host === "") {
+    return p || "index.html";
+  }
+  if (p) {
+    return `${host}/${p}`.replace(/\\/g, "/");
+  }
+  if (host.includes(".")) {
+    return host;
+  }
+  return "index.html";
+}
+function bufferToResponseBody(buf) {
+  return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+}
+function looksLikeHtml(buf) {
+  let i = 0;
+  if (buf.length >= 3 && buf[0] === 239 && buf[1] === 187 && buf[2] === 191) {
+    i = 3;
+  }
+  while (i < buf.length && (buf[i] === 32 || buf[i] === 9 || buf[i] === 10 || buf[i] === 13)) {
+    i += 1;
+  }
+  return i < buf.length && buf[i] === 60;
+}
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, OPTIONS",
+    "Access-Control-Allow-Headers": "*"
+  };
+}
+function registerDashboardSchemePrivileged() {
+  if (privilegedRegistered) {
+    return;
+  }
+  privilegedRegistered = true;
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: SCHEME,
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        corsEnabled: true,
+        stream: true
+      }
+    }
+  ]);
+}
+function ensureDashboardProtocolHandler(uiRoot) {
+  if (handlerRegistered) {
+    return;
+  }
+  if (!app2.isReady()) {
+    throw new Error(
+      "[@electron-memory/monitor] ensureDashboardProtocolHandler: app must be ready before opening dashboard"
+    );
+  }
+  handlerRegistered = true;
+  const base = path2.resolve(uiRoot);
+  protocol.handle(SCHEME, async (request) => {
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders() });
+    }
+    try {
+      const rel = urlToUiRelativePath(request.url);
+      if (!rel || rel.includes("..")) {
+        return new Response("Bad path", { status: 400, headers: corsHeaders() });
+      }
+      const filePath = path2.resolve(path2.join(base, ...rel.split("/")));
+      if (!isPathInsideRoot(filePath, base)) {
+        return new Response("Forbidden", { status: 403, headers: corsHeaders() });
+      }
+      const fileUrl = pathToFileURL(filePath).href;
+      let upstream;
+      try {
+        upstream = await net.fetch(fileUrl);
+      } catch {
+        upstream = new Response(null, { status: 599 });
+      }
+      let buf;
+      if (!upstream.ok) {
+        buf = await readFile(filePath);
+      } else {
+        const ab = await upstream.arrayBuffer();
+        buf = Buffer.from(ab);
+      }
+      const ext = path2.extname(filePath).toLowerCase();
+      if (ext === ".html" && !looksLikeHtml(buf)) {
+        console.error(
+          "[@electron-memory/monitor] emm-dashboard: not HTML at",
+          filePath,
+          "url=",
+          request.url
+        );
+        return new Response("Invalid dashboard HTML", { status: 500, headers: corsHeaders() });
+      }
+      const mime = MIME_BY_EXT[ext] || "application/octet-stream";
+      return new Response(bufferToResponseBody(buf), {
+        status: 200,
+        headers: {
+          "Content-Type": mime,
+          "Cache-Control": "no-store",
+          ...corsHeaders()
+        }
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[@electron-memory/monitor] emm-dashboard:", request.url, err);
+      return new Response(msg, { status: 404, headers: corsHeaders() });
+    }
+  });
+}
+function getDashboardPageURL() {
+  return `${SCHEME}://electron/index.html`;
+}
+
+// src/core/dashboard-window-hooks.ts
+function shouldOpenDevToolsShortcut(input) {
+  if (input.type !== "keyDown") {
+    return false;
+  }
+  if (input.key === "F12") {
+    return true;
+  }
+  const k = input.key.toLowerCase();
+  if (k !== "i") {
+    return false;
+  }
+  if (input.control && input.shift) {
+    return true;
+  }
+  if (process.platform === "darwin" && input.meta && input.alt) {
+    return true;
+  }
+  return false;
+}
+function attachDashboardWindowHooks(win, options) {
+  const wc = win.webContents;
+  wc.on("before-input-event", (event, input) => {
+    if (!shouldOpenDevToolsShortcut(input)) {
+      return;
+    }
+    event.preventDefault();
+    if (wc.isDevToolsOpened()) {
+      wc.closeDevTools();
+    } else {
+      wc.openDevTools({ mode: "detach" });
+    }
+  });
+  wc.on("did-fail-load", (_e, code, desc, url) => {
+    console.error("[@electron-memory/monitor] dashboard did-fail-load", code, desc, url);
+  });
+  let autoOpened = false;
+  wc.on("did-finish-load", () => {
+    if (options.openDevToolsOnStart && !autoOpened) {
+      autoOpened = true;
+      wc.openDevTools({ mode: "detach" });
+    }
+  });
+}
+
+// src/core/dashboard.ts
 var DashboardManager = class {
   constructor(config) {
     this.window = null;
@@ -1093,7 +1314,7 @@ var DashboardManager = class {
       this.window.focus();
       return;
     }
-    const preloadPath = path2.join(__dirname, "dashboard-preload.js");
+    const preloadPath = path3.join(__dirname, "dashboard-preload.js");
     this.window = new BrowserWindow2({
       width: this.config.dashboard.width,
       height: this.config.dashboard.height,
@@ -1102,11 +1323,16 @@ var DashboardManager = class {
       webPreferences: {
         preload: preloadPath,
         contextIsolation: true,
-        nodeIntegration: false
+        nodeIntegration: false,
+        devTools: true
       }
     });
-    const uiPath = path2.join(__dirname, "ui", "index.html");
-    this.window.loadFile(uiPath);
+    attachDashboardWindowHooks(this.window, {
+      openDevToolsOnStart: this.config.dashboard.openDevToolsOnStart
+    });
+    const uiRoot = path3.join(__dirname, "ui");
+    ensureDashboardProtocolHandler(uiRoot);
+    this.window.loadURL(getDashboardPageURL());
     this.window.on("closed", () => {
       this.window = null;
     });
@@ -1239,6 +1465,10 @@ var DEFAULT_CONFIG = {
   enabled: true,
   autoStart: true,
   openDashboardOnStart: true,
+  session: {
+    autoStartOnLaunch: true,
+    autoLabelPrefix: "\u81EA\u52A8\u4F1A\u8BDD"
+  },
   collectInterval: 2e3,
   persistInterval: 60,
   enableRendererDetail: false,
@@ -1257,12 +1487,19 @@ var DEFAULT_CONFIG = {
   dashboard: {
     width: 1400,
     height: 900,
-    alwaysOnTop: false
+    alwaysOnTop: false,
+    openDevToolsOnStart: false
   },
   processLabels: {}
 };
 
 // src/core/monitor.ts
+function formatAutoSessionLabel(prefix) {
+  const d = /* @__PURE__ */ new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+  return `${prefix || "\u81EA\u52A8\u4F1A\u8BDD"} ${stamp}`;
+}
 var ElectronMemoryMonitor = class extends EventEmitter3 {
   constructor(config) {
     super();
@@ -1276,6 +1513,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
       this.dashboard = null;
       return;
     }
+    registerDashboardSchemePrivileged();
     this.collector = new MemoryCollector(this.config);
     this.anomalyDetector = new AnomalyDetector(this.config);
     this.analyzer = new Analyzer();
@@ -1288,10 +1526,10 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
   /** 启动监控 */
   async start() {
     if (!this.config.enabled || this.started) return;
-    if (!app2.isReady()) {
-      await app2.whenReady();
+    if (!app3.isReady()) {
+      await app3.whenReady();
     }
-    const storageDir = this.config.storage.directory || path3.join(app2.getPath("userData"), "memory-monitor");
+    const storageDir = this.config.storage.directory || path4.join(app3.getPath("userData"), "memory-monitor");
     this.persister = new DataPersister(this.config, storageDir);
     this.sessionManager = new SessionManager(this.persister);
     this.ipcHandler = new IPCMainHandler(this);
@@ -1305,11 +1543,19 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
     });
     this.collector.start();
     this.anomalyDetector.start();
+    this.persister.cleanOldSessions();
+    this.started = true;
+    if (this.config.session.autoStartOnLaunch) {
+      try {
+        const label = formatAutoSessionLabel(this.config.session.autoLabelPrefix);
+        this.startSession(label, this.config.session.autoDescription);
+      } catch (err) {
+        console.error("[@electron-memory/monitor] autoStartOnLaunch failed:", err);
+      }
+    }
     if (this.config.openDashboardOnStart) {
       this.openDashboard();
     }
-    this.persister.cleanOldSessions();
-    this.started = true;
   }
   /** 停止监控 */
   async stop() {
@@ -1341,6 +1587,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
     const session = this.sessionManager.startSession(label, description);
     this.collector.setSessionId(session.id);
     this.anomalyDetector.clearAnomalies();
+    this.emit("session-start", session);
     return session.id;
   }
   /** 结束当前会话 */
@@ -1363,7 +1610,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
       anomalies,
       completedSession.dataFile
     );
-    const reportPath = path3.join(this.persister.getStorageDir(), completedSession.id, "report.json");
+    const reportPath = path4.join(this.persister.getStorageDir(), completedSession.id, "report.json");
     const fs2 = await import("fs");
     fs2.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf-8");
     this.emit("session-end", report);
@@ -1393,7 +1640,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
   /** 获取指定会话报告 */
   async getSessionReport(sessionId) {
     const fs2 = await import("fs");
-    const reportPath = path3.join(this.persister.getStorageDir(), sessionId, "report.json");
+    const reportPath = path4.join(this.persister.getStorageDir(), sessionId, "report.json");
     try {
       const content = fs2.readFileSync(reportPath, "utf-8");
       return JSON.parse(content);
@@ -1524,7 +1771,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
       } catch {
       }
     }
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    await new Promise((resolve2) => setTimeout(resolve2, 100));
     const afterMem = process.memoryUsage();
     const freed = beforeMem.heapUsed - afterMem.heapUsed;
     return {
@@ -1537,7 +1784,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
   }
   /** 导出堆快照 */
   async takeHeapSnapshot(filePath) {
-    const snapshotPath = filePath || path3.join(
+    const snapshotPath = filePath || path4.join(
       this.persister.getStorageDir(),
       `heap-${Date.now()}.heapsnapshot`
     );
@@ -1572,10 +1819,22 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
     this.emit("snapshot", snapshot);
   }
   mergeConfig(userConfig) {
-    if (!userConfig) return { ...DEFAULT_CONFIG };
+    if (!userConfig) {
+      return {
+        ...DEFAULT_CONFIG,
+        dashboard: {
+          ...DEFAULT_CONFIG.dashboard,
+          openDevToolsOnStart: process.env.LAUNCHER_MEMORY_MONITOR_DEVTOOLS === "1"
+        }
+      };
+    }
     return {
       ...DEFAULT_CONFIG,
       ...userConfig,
+      session: {
+        ...DEFAULT_CONFIG.session,
+        ...userConfig.session || {}
+      },
       anomaly: {
         ...DEFAULT_CONFIG.anomaly,
         ...userConfig.anomaly || {}
@@ -1586,7 +1845,8 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
       },
       dashboard: {
         ...DEFAULT_CONFIG.dashboard,
-        ...userConfig.dashboard || {}
+        ...userConfig.dashboard || {},
+        openDevToolsOnStart: userConfig.dashboard?.openDevToolsOnStart !== void 0 ? userConfig.dashboard.openDevToolsOnStart : process.env.LAUNCHER_MEMORY_MONITOR_DEVTOOLS === "1"
       },
       processLabels: {
         ...DEFAULT_CONFIG.processLabels,
@@ -1597,6 +1857,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
 };
 export {
   ElectronMemoryMonitor,
-  IPC_CHANNELS
+  IPC_CHANNELS,
+  registerDashboardSchemePrivileged
 };
 //# sourceMappingURL=index.mjs.map
