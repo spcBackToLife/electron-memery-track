@@ -21,11 +21,16 @@ export class SessionManager {
     return this.currentSession
   }
 
-  /** 开始新会话 */
-  startSession(label: string, description?: string): TestSession {
-    // 如果有正在运行的会话，先结束它
+  /** 开始新会话；若顶替了上一条进行中的会话，通过 `replaced` 返回以便主进程补写 report.json */
+  startSession(label: string, description?: string): { session: TestSession; replaced: TestSession | null } {
+    // 冷启动或当前无内存会话时，索引里若仍有 running，多为崩溃残留，与内存不一致
+    if (!this.currentSession) {
+      this.reconcileStaleRunningInIndex()
+    }
+
+    let replaced: TestSession | null = null
     if (this.currentSession && this.currentSession.status === 'running') {
-      this.endSession()
+      replaced = this.endSession()
     }
 
     const sessionId = generateId()
@@ -45,7 +50,7 @@ export class SessionManager {
     this.currentSession = session
     this.persister.saveSessionMeta(session)
 
-    return session
+    return { session, replaced }
   }
 
   /** 结束当前会话 */
@@ -80,5 +85,25 @@ export class SessionManager {
   /** 获取指定会话 */
   getSession(sessionId: string): TestSession | null {
     return this.persister.readSessionMeta(sessionId)
+  }
+
+  /**
+   * 当前内存无活动会话时，将索引中仍为 running 的条目标为 aborted（进程异常退出后残留）
+   */
+  reconcileStaleRunningInIndex(): void {
+    if (this.currentSession) return
+
+    const sessions = this.persister.getSessions()
+    const now = Date.now()
+    for (const s of sessions) {
+      if (s.status !== 'running') continue
+      const fixed: TestSession = {
+        ...s,
+        status: 'aborted',
+        endTime: now,
+        duration: now - s.startTime,
+      }
+      this.persister.saveSessionMeta(fixed)
+    }
   }
 }

@@ -254,6 +254,11 @@ interface SessionIndex {
     sessions: TestSession[];
     lastUpdated: number;
 }
+/** IPC 拉取会话列表时附带「当前是否在录」：以主进程内存为准，避免索引里僵尸 running */
+interface SessionsListPayload {
+    sessions: TestSession[];
+    activeSessionId: string | null;
+}
 
 /**
  * 报告与对比相关类型
@@ -462,6 +467,8 @@ declare class ElectronMemoryMonitor extends EventEmitter {
     startSession(label: string, description?: string): string;
     /** 结束当前会话 */
     stopSession(): Promise<SessionReport | null>;
+    /** 为已落盘元数据的会话生成并写入 report.json（显式结束或被新会话顶替） */
+    private persistCompletedSessionReport;
     /** 打开监控面板 */
     openDashboard(): void;
     /** 关闭监控面板 */
@@ -470,6 +477,10 @@ declare class ElectronMemoryMonitor extends EventEmitter {
     getCurrentSnapshot(): MemorySnapshot | null;
     /** 获取历史会话列表 */
     getSessions(): Promise<TestSession[]>;
+    /**
+     * 供监控面板 IPC：列表来自磁盘索引，是否在录制以内存中的 currentSession 为准（避免索引僵尸 running）
+     */
+    getSessionsPayloadForIpc(): SessionsListPayload;
     /** 获取指定会话报告 */
     getSessionReport(sessionId: string): Promise<SessionReport | null>;
     /** 获取指定会话的快照数据（支持时间过滤和降采样） */
@@ -540,4 +551,4 @@ declare const IPC_CHANNELS: {
     readonly RENDERER_REQUEST: "emm:renderer:request";
 };
 
-export { type AnomalyCategory, type AnomalyEvent, type AnomalyRule, type AnomalySeverity, type CompareReport, ElectronMemoryMonitor, type EventMark, type GCResult, IPC_CHANNELS, type Improvement, type MemorySnapshot, type MetricDiff, type MetricSummary, type MonitorConfig, type ProcessMemoryInfo, type Regression, type RendererV8Detail, type SessionEventMark, type SessionIndex, type SessionReport, type Suggestion, type SystemMemoryInfo, type TestSession, type TrendInfo, type V8HeapDetailStats, type V8HeapSpaceInfo, type V8HeapStats, registerDashboardSchemePrivileged };
+export { type AnomalyCategory, type AnomalyEvent, type AnomalyRule, type AnomalySeverity, type CompareReport, ElectronMemoryMonitor, type EventMark, type GCResult, IPC_CHANNELS, type Improvement, type MemorySnapshot, type MetricDiff, type MetricSummary, type MonitorConfig, type ProcessMemoryInfo, type Regression, type RendererV8Detail, type SessionEventMark, type SessionIndex, type SessionReport, type SessionsListPayload, type Suggestion, type SystemMemoryInfo, type TestSession, type TrendInfo, type V8HeapDetailStats, type V8HeapSpaceInfo, type V8HeapStats, registerDashboardSchemePrivileged };

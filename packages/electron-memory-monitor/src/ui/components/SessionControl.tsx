@@ -64,18 +64,18 @@ const SessionControl: React.FC<SessionControlProps> = ({
               onChange={(e) => setLabel(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleStart()}
             />
-            <button className="btn btn-primary" onClick={handleStart} disabled={!label.trim()}>
+            <button type="button" className="btn btn-primary" onClick={handleStart} disabled={!label.trim()}>
               ▶ 开始会话
             </button>
           </div>
         ) : (
-          <button className="btn btn-danger" onClick={handleStop} disabled={isStopping}>
+          <button type="button" className="btn btn-danger" onClick={handleStop} disabled={isStopping}>
             {isStopping ? '⏳ 结束中...' : '⏹ 结束会话'}
           </button>
         )}
 
         <div className="session-tools">
-          <button className="btn btn-secondary" onClick={onTriggerGC} title="手动触发垃圾回收">
+          <button type="button" className="btn btn-secondary" onClick={onTriggerGC} title="手动触发垃圾回收">
             🗑️ GC
           </button>
 
@@ -87,7 +87,7 @@ const SessionControl: React.FC<SessionControlProps> = ({
               onChange={(e) => setMarkLabel(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleMark()}
             />
-            <button className="btn btn-secondary" onClick={handleMark} disabled={!markLabel.trim()}>
+            <button type="button" className="btn btn-secondary" onClick={handleMark} disabled={!markLabel.trim()}>
               📌 标记
             </button>
             {markCount > 0 && (

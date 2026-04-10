@@ -3,6 +3,8 @@ import type { V8HeapDetailStats } from '../../types/snapshot'
 
 interface V8HeapDetailProps {
   v8Detail: V8HeapDetailStats
+  /** 默认强调为 Electron Browser（主进程）侧 Node/V8，避免与「渲染进程 V8」混淆 */
+  title?: string
 }
 
 const formatBytes = (bytes: number | undefined | null): string => {
@@ -14,14 +16,20 @@ const formatBytes = (bytes: number | undefined | null): string => {
   return `${bytes} B`
 }
 
-const V8HeapDetail: React.FC<V8HeapDetailProps> = ({ v8Detail }) => {
+const V8HeapDetail: React.FC<V8HeapDetailProps> = ({
+  v8Detail,
+  title = '主进程 V8 堆详情（Browser / Node）',
+}) => {
   const heapUsagePercent = v8Detail?.heapTotal > 0
     ? Math.round(((v8Detail.heapUsed || 0) / v8Detail.heapTotal) * 100)
     : 0
 
   return (
     <div className="v8-heap-detail">
-      <h3>主进程 V8 堆详情</h3>
+      <h3>{title}</h3>
+      <p className="v8-heap-detail-caption">
+        来自主进程内 Node 的 <code>process.memoryUsage</code> 与 <code>v8.getHeapStatistics</code>，不是各网页标签里的 Chromium JS 堆（后者见「渲染进程 V8」表）。
+      </p>
 
       <div className="v8-overview">
         <div className="v8-stat">

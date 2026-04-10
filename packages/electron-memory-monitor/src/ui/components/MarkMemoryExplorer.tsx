@@ -1,7 +1,7 @@
-import React, { useMemo, useState, useEffect } from 'react'
+import React, { useMemo, useState, useEffect, useCallback } from 'react'
 import {
-  BarChart,
-  Bar,
+  LineChart,
+  Line,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -11,6 +11,7 @@ import {
 } from 'recharts'
 import ProcessTable from './ProcessTable'
 import V8HeapDetail from './V8HeapDetail'
+import RendererV8Table from './RendererV8Table'
 import { listMarksWithSnapshots, type MarkWithSnapshot } from '../utils/marksWithSnapshots'
 import type { MemorySnapshot } from '../../types/snapshot'
 
@@ -77,6 +78,26 @@ function buildRows(items: MarkWithSnapshot[]): MarkBarRow[] {
   })
 }
 
+function renderMarkLineDot(
+  props: { cx?: number; cy?: number; index?: number; stroke?: string },
+  onPick: (index: number) => void
+) {
+  const { cx, cy, index, stroke } = props
+  if (cx == null || cy == null || index == null) return null
+  return (
+    <circle
+      cx={cx}
+      cy={cy}
+      r={4}
+      fill={stroke || '#888'}
+      stroke="rgba(0,0,0,0.35)"
+      strokeWidth={1}
+      style={{ cursor: 'pointer' }}
+      onClick={() => onPick(index)}
+    />
+  )
+}
+
 interface MarkMemoryExplorerProps {
   snapshots: MemorySnapshot[]
   /** 嵌入页标题微调 */
@@ -100,10 +121,13 @@ const MarkMemoryExplorer: React.FC<MarkMemoryExplorerProps> = ({ snapshots, vari
     })
   }, [rows])
 
-  const pickRowByBarIndex = (index: number) => {
-    const r = rows[index]
-    if (r) setSelectedKey(r.key)
-  }
+  const pickRowByIndex = useCallback(
+    (index: number) => {
+      const r = rows[index]
+      if (r) setSelectedKey(r.key)
+    },
+    [rows]
+  )
 
   const selected = useMemo(
     () => rows.find((r) => r.key === selectedKey) ?? null,
@@ -140,17 +164,13 @@ const MarkMemoryExplorer: React.FC<MarkMemoryExplorerProps> = ({ snapshots, vari
           </select>
         </label>
         <span className="mark-explorer-caption">
-          堆叠柱为各标记所在<strong>采样时刻</strong>的工作集（主进程 / 渲染 / GPU / 其他）。点击某一柱可切换下方详情。
+          折线按标记时间顺序连接各<strong>采样时刻</strong>工作集（MB）：Browser / 渲染 / GPU / 其他。点击折线上圆点可切换下方进程表与 V8（主进程 + 各渲染进程）。
         </span>
       </div>
 
       <div className="mark-explorer-chart-wrap">
         <ResponsiveContainer width="100%" height={320}>
-          <BarChart
-            data={rows}
-            margin={{ top: 8, right: 16, left: 8, bottom: 48 }}
-            barCategoryGap="18%"
-          >
+          <LineChart data={rows} margin={{ top: 8, right: 16, left: 8, bottom: 48 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.08)" />
             <XAxis
               dataKey="axisLabel"
@@ -181,39 +201,47 @@ const MarkMemoryExplorer: React.FC<MarkMemoryExplorerProps> = ({ snapshots, vari
               }}
             />
             <Legend />
-            <Bar
-              stackId="mem"
+            <Line
+              type="monotone"
               dataKey="browser"
               name="主进程"
-              fill={COLORS.browser}
-              onClick={(_d, index) => pickRowByBarIndex(index)}
-              cursor="pointer"
+              stroke={COLORS.browser}
+              strokeWidth={2}
+              dot={(p) => renderMarkLineDot(p, pickRowByIndex)}
+              activeDot={{ r: 6 }}
+              connectNulls
             />
-            <Bar
-              stackId="mem"
+            <Line
+              type="monotone"
               dataKey="renderer"
               name="渲染进程"
-              fill={COLORS.renderer}
-              onClick={(_d, index) => pickRowByBarIndex(index)}
-              cursor="pointer"
+              stroke={COLORS.renderer}
+              strokeWidth={2}
+              dot={(p) => renderMarkLineDot(p, pickRowByIndex)}
+              activeDot={{ r: 6 }}
+              connectNulls
             />
-            <Bar
-              stackId="mem"
+            <Line
+              type="monotone"
               dataKey="gpu"
               name="GPU"
-              fill={COLORS.gpu}
-              onClick={(_d, index) => pickRowByBarIndex(index)}
-              cursor="pointer"
+              stroke={COLORS.gpu}
+              strokeWidth={2}
+              dot={(p) => renderMarkLineDot(p, pickRowByIndex)}
+              activeDot={{ r: 6 }}
+              connectNulls
             />
-            <Bar
-              stackId="mem"
+            <Line
+              type="monotone"
               dataKey="other"
               name="其他"
-              fill={COLORS.other}
-              onClick={(_d, index) => pickRowByBarIndex(index)}
-              cursor="pointer"
+              stroke={COLORS.other}
+              strokeWidth={2}
+              dot={(p) => renderMarkLineDot(p, pickRowByIndex)}
+              activeDot={{ r: 6 }}
+              connectNulls
             />
-          </BarChart>
+          </LineChart>
         </ResponsiveContainer>
       </div>
 
@@ -238,9 +266,18 @@ const MarkMemoryExplorer: React.FC<MarkMemoryExplorerProps> = ({ snapshots, vari
 
           {selected.snapshot.mainProcessV8Detail && (
             <div className="section mark-explorer-v8-section">
-              <V8HeapDetail v8Detail={selected.snapshot.mainProcessV8Detail} />
+              <V8HeapDetail
+                v8Detail={selected.snapshot.mainProcessV8Detail}
+                title="📌 标记时刻 · 主进程 V8 堆详情"
+              />
             </div>
           )}
+          <div className="section mark-explorer-renderer-v8-section">
+            <RendererV8Table
+              processes={selected.snapshot.processes}
+              details={selected.snapshot.rendererDetails}
+            />
+          </div>
         </div>
       )}
     </div>

@@ -299,13 +299,13 @@ var DataPersister = class {
       return null;
     }
   }
-  /** 获取所有会话列表 */
+  /** 获取所有会话列表（按 startTime 降序，最新在前；与索引写入顺序无关） */
   getSessions() {
     const indexFile = path.join(this.storageDir, "sessions.json");
     try {
       const content = fs.readFileSync(indexFile, "utf-8");
       const index = JSON.parse(content);
-      return index.sessions;
+      return this.sortSessionsByStartDesc(index.sessions);
     } catch {
       return [];
     }
@@ -408,10 +408,18 @@ var DataPersister = class {
   saveSessionIndex(sessions) {
     const indexFile = path.join(this.storageDir, "sessions.json");
     const index = {
-      sessions,
+      sessions: this.sortSessionsByStartDesc(sessions),
       lastUpdated: Date.now()
     };
     fs.writeFileSync(indexFile, JSON.stringify(index, null, 2), "utf-8");
+  }
+  /** 统一排序：startTime 新 → 旧（同毫秒时按 id 稳定排序） */
+  sortSessionsByStartDesc(sessions) {
+    return [...sessions].sort((a, b) => {
+      const t = b.startTime - a.startTime;
+      if (t !== 0) return t;
+      return String(b.id).localeCompare(String(a.id));
+    });
   }
   ensureDirectory(dir) {
     if (!fs.existsSync(dir)) {
@@ -475,10 +483,14 @@ var SessionManager = class {
   getCurrentSession() {
     return this.currentSession;
   }
-  /** 开始新会话 */
+  /** 开始新会话；若顶替了上一条进行中的会话，通过 `replaced` 返回以便主进程补写 report.json */
   startSession(label, description) {
+    if (!this.currentSession) {
+      this.reconcileStaleRunningInIndex();
+    }
+    let replaced = null;
     if (this.currentSession && this.currentSession.status === "running") {
-      this.endSession();
+      replaced = this.endSession();
     }
     const sessionId = v4();
     const { dataFile, metaFile } = this.persister.createSessionFiles(sessionId);
@@ -494,7 +506,7 @@ var SessionManager = class {
     };
     this.currentSession = session;
     this.persister.saveSessionMeta(session);
-    return session;
+    return { session, replaced };
   }
   /** 结束当前会话 */
   endSession() {
@@ -521,6 +533,24 @@ var SessionManager = class {
   /** 获取指定会话 */
   getSession(sessionId) {
     return this.persister.readSessionMeta(sessionId);
+  }
+  /**
+   * 当前内存无活动会话时，将索引中仍为 running 的条目标为 aborted（进程异常退出后残留）
+   */
+  reconcileStaleRunningInIndex() {
+    if (this.currentSession) return;
+    const sessions = this.persister.getSessions();
+    const now = Date.now();
+    for (const s of sessions) {
+      if (s.status !== "running") continue;
+      const fixed = {
+        ...s,
+        status: "aborted",
+        endTime: now,
+        duration: now - s.startTime
+      };
+      this.persister.saveSessionMeta(fixed);
+    }
   }
 };
 
@@ -1510,10 +1540,28 @@ var IPCMainHandler = class {
       return this.monitor.startSession(args.label, args.description);
     });
     import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_STOP, async () => {
-      return this.monitor.stopSession();
+      try {
+        const report = await this.monitor.stopSession();
+        if (!report) {
+          return { ok: false, reason: "no_active_session" };
+        }
+        return {
+          ok: true,
+          sessionId: report.sessionId,
+          label: report.label,
+          durationMs: report.duration
+        };
+      } catch (err) {
+        console.error("[electron-memory-monitor] SESSION_STOP failed:", err);
+        return {
+          ok: false,
+          reason: "error",
+          message: err instanceof Error ? err.message : String(err)
+        };
+      }
     });
     import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => {
-      return this.monitor.getSessions();
+      return this.monitor.getSessionsPayloadForIpc();
     });
     import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_REPORT, async (_event, sessionId) => {
       return this.monitor.getSessionReport(sessionId);
@@ -1537,7 +1585,7 @@ var IPCMainHandler = class {
       return this.monitor.getConfig();
     });
     import_electron4.ipcMain.handle(IPC_CHANNELS.GET_SESSIONS, async () => {
-      return this.monitor.getSessions();
+      return this.monitor.getSessionsPayloadForIpc();
     });
     import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_EXPORT, async (_event, sessionId) => {
       return this.monitor.exportSession(sessionId);
@@ -1548,8 +1596,11 @@ var IPCMainHandler = class {
     import_electron4.ipcMain.handle(IPC_CHANNELS.SESSION_DELETE, async (_event, sessionId) => {
       return this.monitor.deleteSession(sessionId);
     });
-    import_electron4.ipcMain.on(IPC_CHANNELS.RENDERER_REPORT, (_event, detail) => {
-      this.monitor.updateRendererDetail(detail);
+    import_electron4.ipcMain.on(IPC_CHANNELS.RENDERER_REPORT, (event, detail) => {
+      this.monitor.updateRendererDetail({
+        ...detail,
+        webContentsId: event.sender.id
+      });
     });
   }
   /** 向监控面板推送快照数据 */
@@ -1682,6 +1733,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
     this.collector.start();
     this.anomalyDetector.start();
     this.persister.cleanOldSessions();
+    this.sessionManager.reconcileStaleRunningInIndex();
     this.started = true;
     if (this.config.session.autoStartOnLaunch) {
       try {
@@ -1722,7 +1774,13 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
     if (!this.started) {
       throw new Error("Monitor is not started");
     }
-    const session = this.sessionManager.startSession(label, description);
+    const anomaliesForReplaced = this.anomalyDetector.getAnomalies();
+    const { session, replaced } = this.sessionManager.startSession(label, description);
+    if (replaced) {
+      void this.persistCompletedSessionReport(replaced, anomaliesForReplaced).catch((err) => {
+        console.error("[@electron-memory/monitor] \u88AB\u9876\u66FF\u4F1A\u8BDD\u7684\u62A5\u544A\u5199\u5165\u5931\u8D25:", err);
+      });
+    }
     this.collector.setSessionId(session.id);
     this.anomalyDetector.clearAnomalies();
     this.emit("session-start", session);
@@ -1736,8 +1794,26 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
     const completedSession = this.sessionManager.endSession();
     if (!completedSession) return null;
     this.collector.setSessionId(null);
-    const snapshots = this.persister.readSessionSnapshots(completedSession.id);
     const anomalies = this.anomalyDetector.getAnomalies();
+    const report = await this.persistCompletedSessionReport(completedSession, anomalies);
+    return report;
+  }
+  /** 为已落盘元数据的会话生成并写入 report.json（显式结束或被新会话顶替） */
+  async persistCompletedSessionReport(completedSession, anomalies) {
+    const fs2 = await import("fs/promises");
+    const snapshotsPath = path4.join(
+      this.persister.getStorageDir(),
+      completedSession.id,
+      "snapshots.jsonl"
+    );
+    let snapshots = [];
+    try {
+      const content = await fs2.readFile(snapshotsPath, "utf-8");
+      const lines = content.trim().split("\n").filter(Boolean);
+      snapshots = lines.map((line) => JSON.parse(line));
+    } catch {
+      snapshots = this.persister.readSessionSnapshots(completedSession.id);
+    }
     const report = this.analyzer.generateReport(
       completedSession.id,
       completedSession.label,
@@ -1749,8 +1825,7 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
       completedSession.dataFile
     );
     const reportPath = path4.join(this.persister.getStorageDir(), completedSession.id, "report.json");
-    const fs2 = await import("fs");
-    fs2.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf-8");
+    await fs2.writeFile(reportPath, JSON.stringify(report, null, 2), "utf-8");
     this.emit("session-end", report);
     return report;
   }
@@ -1774,6 +1849,18 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
   /** 获取历史会话列表 */
   async getSessions() {
     return this.sessionManager.getSessions();
+  }
+  /**
+   * 供监控面板 IPC：列表来自磁盘索引，是否在录制以内存中的 currentSession 为准（避免索引僵尸 running）
+   */
+  getSessionsPayloadForIpc() {
+    if (!this.started) {
+      return { sessions: [], activeSessionId: null };
+    }
+    return {
+      sessions: this.sessionManager.getSessions(),
+      activeSessionId: this.sessionManager.getCurrentSession()?.id ?? null
+    };
   }
   /** 获取指定会话报告 */
   async getSessionReport(sessionId) {

@@ -4,6 +4,7 @@ import MemoryChart from '../components/MemoryChart'
 import MemoryPieChart from '../components/MemoryPieChart'
 import ProcessTable from '../components/ProcessTable'
 import V8HeapDetail from '../components/V8HeapDetail'
+import RendererV8Table from '../components/RendererV8Table'
 import MarkMemoryExplorer from '../components/MarkMemoryExplorer'
 import { useSession } from '../hooks/useSession'
 import { eventMarksFromSnapshots } from '../utils/eventMarksFromSnapshots'
@@ -281,7 +282,7 @@ const Report: React.FC<ReportProps> = ({ paneVisible = true }) => {
             </div>
           ) : (
             <div className="session-items">
-              {[...sessions].reverse().map((session) => (
+              {sessions.map((session) => (
                 <div
                   key={session.id}
                   className={`session-item ${selectedSession?.id === session.id ? 'active' : ''}`}
@@ -527,7 +528,7 @@ const Report: React.FC<ReportProps> = ({ paneVisible = true }) => {
                     📋 进程详情
                   </button>
                   <button className={`panel-toggle ${showV8 ? 'active' : ''}`} onClick={() => setShowV8(!showV8)}>
-                    🔧 V8 堆详情
+                    🔧 V8（主进程+渲染）
                   </button>
                   <button
                     className={`panel-toggle ${showMarkExplorer ? 'active' : ''}`}
@@ -545,8 +546,18 @@ const Report: React.FC<ReportProps> = ({ paneVisible = true }) => {
                 )}
 
                 {!snapshotsLoading && snapshots.length === 0 && (
-                  <div className="report-no-data">
-                    <span>该时间范围内无数据</span>
+                  <div className="report-no-data report-no-snapshots-detail">
+                    <p><strong>该时间范围内没有快照点</strong>，因此不会显示趋势图、进程表、主进程/渲染 V8 表。</p>
+                    {selectedSession?.status === 'aborted' && (
+                      <p className="report-aborted-hint">
+                        当前会话为 <strong>aborted</strong>：通常是<strong>上次未点看板「结束会话」就关了应用</strong>，或<strong>开发时 vite / electron 主进程频繁热重启</strong>。
+                        下次启动时 SDK 会把磁盘上仍为 running 的旧会话标为 aborted，且若进程死得太快可能<strong>0 条采样</strong>。
+                        正常关应用前让当前会话走完 <code>stopSession</code>（browser-sim 已在退出时自动调用）可减少此类记录。
+                      </p>
+                    )}
+                    <p className="report-renderer-v8-hint">
+                      <strong>渲染进程 V8</strong>写在每条快照的 <code>rendererDetails</code> 里；无快照就无从展示。有数据时请在「<strong>V8（主进程+渲染）</strong>」折叠里向下滚动查看「渲染进程 V8」表，并确认业务 WebContents 的 preload 已 <code>injectRendererReporter()</code> 且 <code>enableRendererDetail: true</code>。
+                    </p>
                   </div>
                 )}
 
@@ -588,11 +599,20 @@ const Report: React.FC<ReportProps> = ({ paneVisible = true }) => {
                       </div>
                     )}
 
-                    {/* V8 堆详情 */}
-                    {showV8 && latestSnapshot?.mainProcessV8Detail && (
+                    {/* 主进程 Node/V8 + 各渲染进程 Chromium V8（快照末时刻） */}
+                    {showV8 && latestSnapshot && (
                       <div className="report-chart-panel">
-                        <div className="chart-container" style={{ margin: 0 }}>
-                          <V8HeapDetail v8Detail={latestSnapshot.mainProcessV8Detail} />
+                        {latestSnapshot.mainProcessV8Detail && (
+                          <div className="chart-container" style={{ margin: 0 }}>
+                            <V8HeapDetail v8Detail={latestSnapshot.mainProcessV8Detail} />
+                          </div>
+                        )}
+                        <div className="chart-container" style={{ marginTop: 16 }}>
+                          <RendererV8Table
+                            processes={latestSnapshot.processes}
+                            details={latestSnapshot.rendererDetails}
+                            emptyHint="该时间范围内最后一条快照无渲染进程 V8；请确认业务页 preload 已 injectRendererReporter。"
+                          />
                         </div>
                       </div>
                     )}

@@ -13,17 +13,26 @@
  *   - 下方区域由动态创建/销毁的 WebContentsView 加载外部网页
  */
 
-import { app, BaseWindow, WebContentsView, ipcMain, session } from 'electron'
+import { app, BaseWindow, WebContentsView, ipcMain } from 'electron'
 import { ElectronMemoryMonitor } from '@electron-memory/monitor'
 import path from 'path'
 
 const __dirname_electron = path.dirname(__filename)
 const RENDERER_DIST = path.join(__dirname_electron, '../dist')
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
+const TAB_PRELOAD_PATH = path.join(__dirname_electron, 'tab-preload.js')
 
 // ===== 内存监控 =====
 const monitor = new ElectronMemoryMonitor({
   openDashboardOnStart: true,
+  enableRendererDetail: true,
+  /** 每次进程启动一条带时间戳的会话（与默认「自动会话」相同机制），不写死「基线」 */
+  session: {
+    autoStartOnLaunch: true,
+    autoLabelPrefix: 'browser-sim',
+    autoDescription:
+      '主进程 ready → 壳 WebContentsView → 标签页加载各阶段 monitor.mark',
+  },
   processLabels: {
     'Browser Simulator': '浏览器模拟器',
   },
@@ -40,8 +49,41 @@ let tabIdCounter = 0
 // 控制面板高度
 const TOOLBAR_HEIGHT = 140
 
+/** 标签页 WebContents 各加载阶段 → 监控 Mark（下一拍采样写入） */
+function attachTabLoadLifecycleMarks(
+  tabId: string,
+  wc: Electron.WebContents,
+  targetUrl: string
+) {
+  const urlShort =
+    targetUrl.length > 200 ? `${targetUrl.slice(0, 200)}…` : targetUrl
+  monitor.mark('tab:before-loadURL', { tabId, url: urlShort })
+
+  wc.once('did-start-loading', () => {
+    monitor.mark('tab:did-start-loading', { tabId })
+  })
+  wc.once('dom-ready', () => {
+    monitor.mark('tab:dom-ready', { tabId })
+  })
+  wc.once('did-finish-load', () => {
+    monitor.mark('tab:did-finish-load', { tabId })
+  })
+  wc.once('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame) {
+      monitor.mark('tab:did-fail-load', {
+        tabId,
+        errorCode,
+        errorDescription,
+        validatedURL,
+      })
+    }
+  })
+}
+
 // ===== 创建主窗口 =====
 function createMainWindow() {
+  monitor.mark('lifecycle:before-base-window')
+
   mainWindow = new BaseWindow({
     width: 1400,
     height: 900,
@@ -49,6 +91,8 @@ function createMainWindow() {
     minHeight: 600,
     title: 'Browser Simulator - Memory Test',
   })
+
+  monitor.mark('lifecycle:base-window-created')
 
   // 创建控制面板视图（固定在顶部）
   controlView = new WebContentsView({
@@ -59,13 +103,40 @@ function createMainWindow() {
     },
   })
 
+  monitor.mark('lifecycle:control-view-created')
+
   mainWindow.contentView.addChildView(controlView)
+
+  monitor.mark('lifecycle:control-view-attached')
+
+  const shellWc = controlView.webContents
+  monitor.mark('lifecycle:shell-load-start', {
+    dev: Boolean(VITE_DEV_SERVER_URL),
+  })
+  shellWc.once('did-start-loading', () => {
+    monitor.mark('lifecycle:shell-did-start-loading')
+  })
+  shellWc.once('dom-ready', () => {
+    monitor.mark('lifecycle:shell-dom-ready')
+  })
+  shellWc.once('did-finish-load', () => {
+    monitor.mark('lifecycle:shell-did-finish-load')
+  })
+  shellWc.once('did-fail-load', (_e, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame) {
+      monitor.mark('lifecycle:shell-did-fail-load', {
+        errorCode,
+        errorDescription,
+        validatedURL,
+      })
+    }
+  })
 
   // 加载控制面板 UI
   if (VITE_DEV_SERVER_URL) {
-    controlView.webContents.loadURL(VITE_DEV_SERVER_URL)
+    shellWc.loadURL(VITE_DEV_SERVER_URL)
   } else {
-    controlView.webContents.loadFile(path.join(RENDERER_DIST, 'index.html'))
+    shellWc.loadFile(path.join(RENDERER_DIST, 'index.html'))
   }
 
   // 布局
@@ -76,6 +147,7 @@ function createMainWindow() {
   })
 
   mainWindow.on('closed', () => {
+    monitor.mark('lifecycle:main-window-closed')
     // 清理所有标签页
     for (const [id, view] of tabViews) {
       try {
@@ -151,9 +223,9 @@ ipcMain.handle('browser:open-tab', async (_event, url: string) => {
 
   const tabView = new WebContentsView({
     webPreferences: {
+      preload: TAB_PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
     },
   })
 
@@ -161,6 +233,8 @@ ipcMain.handle('browser:open-tab', async (_event, url: string) => {
 
   // 先隐藏其他标签页，显示新的
   showTab(tabId)
+
+  attachTabLoadLifecycleMarks(tabId, tabView.webContents, url)
 
   // 加载 URL
   try {
@@ -250,14 +324,16 @@ ipcMain.handle(
       const tabId = `tab-${++tabIdCounter}`
       const tabView = new WebContentsView({
         webPreferences: {
+          preload: TAB_PRELOAD_PATH,
           contextIsolation: true,
           nodeIntegration: false,
-          sandbox: true,
         },
       })
 
       tabViews.set(tabId, tabView)
       showTab(tabId)
+
+      attachTabLoadLifecycleMarks(tabId, tabView.webContents, url)
 
       try {
         await tabView.webContents.loadURL(url)
@@ -306,13 +382,13 @@ ipcMain.handle(
 
     const { urls, openDelay, closeDelay, rounds } = options
 
-    // 开始一个监控会话
-    monitor.startSession(
-      `browser-sim-autotest-r${rounds}`,
-      `自动测试: ${rounds} 轮, ${urls.length} 个URL, 打开间隔${openDelay}ms, 关闭间隔${closeDelay}ms`
-    )
-
-    monitor.mark('autotest:start', { rounds, urlCount: urls.length, openDelay, closeDelay })
+    // 会话在监控 SDK 启动时已创建（browser-sim + 时间戳）；此处只打标，避免顶替/误关主会话
+    monitor.mark('autotest:start', {
+      rounds,
+      urlCount: urls.length,
+      openDelay,
+      closeDelay,
+    })
 
     try {
       for (let round = 0; round < rounds; round++) {
@@ -335,14 +411,16 @@ ipcMain.handle(
           const tabId = `tab-${++tabIdCounter}`
           const tabView = new WebContentsView({
             webPreferences: {
+              preload: TAB_PRELOAD_PATH,
               contextIsolation: true,
               nodeIntegration: false,
-              sandbox: true,
             },
           })
 
           tabViews.set(tabId, tabView)
           showTab(tabId)
+
+          attachTabLoadLifecycleMarks(tabId, tabView.webContents, url)
 
           try {
             await tabView.webContents.loadURL(url)
@@ -402,13 +480,6 @@ ipcMain.handle(
     autoTestAbortController = null
 
     monitor.mark('autotest:stop', { aborted: autotestAborted })
-
-    // 结束监控会话
-    try {
-      await monitor.stopSession()
-    } catch (_e) {
-      // ignore
-    }
 
     controlView?.webContents.send('browser:auto-test-done')
     return { success: true }
@@ -477,11 +548,30 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 // ===== App Lifecycle =====
+/** 避免关窗/重启进程后索引里残留 running → 下次启动全变 aborted、0 条快照 */
+let memoryMonitorQuitHandled = false
+app.on('before-quit', (e) => {
+  if (memoryMonitorQuitHandled) return
+  memoryMonitorQuitHandled = true
+  e.preventDefault()
+  void (async () => {
+    try {
+      await monitor.stopSession()
+    } catch (err) {
+      console.error('[browser-sim] 退出时 stopSession:', err)
+    }
+    app.exit(0)
+  })()
+})
+
 app.whenReady().then(() => {
+  monitor.mark('lifecycle:app-ready')
+
   createMainWindow()
 
   app.on('activate', () => {
     if (!mainWindow) {
+      monitor.mark('lifecycle:activate-recreate-window')
       createMainWindow()
     }
   })

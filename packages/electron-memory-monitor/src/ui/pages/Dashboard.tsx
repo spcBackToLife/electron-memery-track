@@ -7,6 +7,7 @@ import MemoryPieChart from '../components/MemoryPieChart'
 import AlertPanel from '../components/AlertPanel'
 import SessionControl from '../components/SessionControl'
 import V8HeapDetail from '../components/V8HeapDetail'
+import RendererV8Table from '../components/RendererV8Table'
 import { useMemoryData } from '../hooks/useMemoryData'
 import { useSession } from '../hooks/useSession'
 
@@ -89,7 +90,7 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
         />
         <MetricCard
           icon="🧠"
-          title="主进程"
+          title="Browser 工作集"
           value={formatKB(browserProcess?.memory.workingSetSize || 0)}
           color="#f5a623"
         />
@@ -102,7 +103,7 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
         />
         <MetricCard
           icon="📊"
-          title="V8 Heap Used"
+          title="主进程 V8 Used"
           value={formatBytes(latestSnapshot.mainProcessMemory.heapUsed)}
           color="#52c41a"
         />
@@ -138,7 +139,7 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
       <div className="section dashboard-mark-explorer-section">
         <h3>📍 标记点内存对比与详情</h3>
         <p className="report-marks-hint" style={{ marginTop: 0 }}>
-          下图汇总当前缓冲区内各标记所在采样时刻；下拉或点击柱形查看该时刻的进程表与主进程 V8 堆空间（与下方常驻面板一致）。完整会话请结束后在「历史报告」查看。
+          下图汇总当前缓冲区内各标记所在采样时刻；下拉或点击柱形查看该时刻的进程表、主进程 V8 与各渲染进程 V8 表。完整会话请结束后在「历史报告」查看。
         </p>
         <MarkMemoryExplorer snapshots={snapshots} variant="dashboard" />
       </div>
@@ -146,15 +147,24 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
       {/* 进程表格 */}
       <div className="section">
         <h3>📋 进程详情</h3>
+        <p className="process-table-caption">
+          由系统枚举<strong>全部</strong> Electron 子进程（含每个 Tab），与当前焦点标签无关，无需为了看内存去切换 Tab。
+        </p>
         <ProcessTable processes={latestSnapshot.processes} />
       </div>
 
-      {/* V8 堆详情 */}
+      {/* 主进程 V8（Node）与渲染进程 V8（Chromium，多行） */}
       {latestSnapshot.mainProcessV8Detail && (
         <div className="section">
           <V8HeapDetail v8Detail={latestSnapshot.mainProcessV8Detail} />
         </div>
       )}
+      <div className="section">
+        <RendererV8Table
+          processes={latestSnapshot.processes}
+          details={latestSnapshot.rendererDetails}
+        />
+      </div>
 
       {/* 告警面板 */}
       <div className="section">

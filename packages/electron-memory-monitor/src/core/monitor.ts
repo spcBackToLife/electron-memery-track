@@ -19,7 +19,7 @@ import { registerDashboardSchemePrivileged } from './dashboard-protocol'
 import { IPCMainHandler } from '../ipc/main-handler'
 import { DEFAULT_CONFIG, type MonitorConfig } from '../types/config'
 import type { MemorySnapshot, RendererV8Detail } from '../types/snapshot'
-import type { TestSession } from '../types/session'
+import type { SessionsListPayload, TestSession } from '../types/session'
 import type { AnomalyEvent } from '../types/anomaly'
 import type { SessionReport, CompareReport, GCResult } from '../types/report'
 
@@ -143,6 +143,9 @@ export class ElectronMemoryMonitor extends EventEmitter {
     // 清理过期会话
     this.persister.cleanOldSessions()
 
+    // 修复索引中与内存不一致的 running（例如上次崩溃未写入 completed）
+    this.sessionManager.reconcileStaleRunningInIndex()
+
     this.started = true
 
     // 自动开始会话（每次启动一条带时间戳的报告，无需在看板点「开始会话」）
@@ -196,7 +199,14 @@ export class ElectronMemoryMonitor extends EventEmitter {
       throw new Error('Monitor is not started')
     }
 
-    const session = this.sessionManager.startSession(label, description)
+    const anomaliesForReplaced = this.anomalyDetector.getAnomalies()
+    const { session, replaced } = this.sessionManager.startSession(label, description)
+    if (replaced) {
+      void this.persistCompletedSessionReport(replaced, anomaliesForReplaced).catch((err) => {
+        console.error('[@electron-memory/monitor] 被顶替会话的报告写入失败:', err)
+      })
+    }
+
     this.collector.setSessionId(session.id)
     this.anomalyDetector.clearAnomalies()
 
@@ -212,15 +222,35 @@ export class ElectronMemoryMonitor extends EventEmitter {
     const session = this.sessionManager.getCurrentSession()
     if (!session) return null
 
-    // 结束会话
     const completedSession = this.sessionManager.endSession()
     if (!completedSession) return null
 
     this.collector.setSessionId(null)
 
-    // 生成报告
-    const snapshots = this.persister.readSessionSnapshots(completedSession.id)
     const anomalies = this.anomalyDetector.getAnomalies()
+    const report = await this.persistCompletedSessionReport(completedSession, anomalies)
+    return report
+  }
+
+  /** 为已落盘元数据的会话生成并写入 report.json（显式结束或被新会话顶替） */
+  private async persistCompletedSessionReport(
+    completedSession: TestSession,
+    anomalies: AnomalyEvent[]
+  ): Promise<SessionReport> {
+    const fs = await import('fs/promises')
+    const snapshotsPath = path.join(
+      this.persister.getStorageDir(),
+      completedSession.id,
+      'snapshots.jsonl'
+    )
+    let snapshots: MemorySnapshot[] = []
+    try {
+      const content = await fs.readFile(snapshotsPath, 'utf-8')
+      const lines = content.trim().split('\n').filter(Boolean)
+      snapshots = lines.map((line) => JSON.parse(line) as MemorySnapshot)
+    } catch {
+      snapshots = this.persister.readSessionSnapshots(completedSession.id)
+    }
 
     const report = this.analyzer.generateReport(
       completedSession.id,
@@ -233,10 +263,8 @@ export class ElectronMemoryMonitor extends EventEmitter {
       completedSession.dataFile
     )
 
-    // 保存报告
     const reportPath = path.join(this.persister.getStorageDir(), completedSession.id, 'report.json')
-    const fs = await import('fs')
-    fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8')
+    await fs.writeFile(reportPath, JSON.stringify(report, null, 2), 'utf-8')
 
     this.emit('session-end', report)
     return report
@@ -269,6 +297,19 @@ export class ElectronMemoryMonitor extends EventEmitter {
   /** 获取历史会话列表 */
   async getSessions(): Promise<TestSession[]> {
     return this.sessionManager.getSessions()
+  }
+
+  /**
+   * 供监控面板 IPC：列表来自磁盘索引，是否在录制以内存中的 currentSession 为准（避免索引僵尸 running）
+   */
+  getSessionsPayloadForIpc(): SessionsListPayload {
+    if (!this.started) {
+      return { sessions: [], activeSessionId: null }
+    }
+    return {
+      sessions: this.sessionManager.getSessions(),
+      activeSessionId: this.sessionManager.getCurrentSession()?.id ?? null,
+    }
   }
 
   /** 获取指定会话报告 */

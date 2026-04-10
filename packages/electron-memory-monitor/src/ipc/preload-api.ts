@@ -6,13 +6,14 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from './channels'
+import type { SessionsListPayload, TestSession } from '../types/session'
 
 /** 监控面板 preload 注入的 API 类型 */
 export interface MonitorPanelAPI {
   // 会话控制
   startSession: (label: string, description?: string) => Promise<string>
   stopSession: () => Promise<unknown>
-  getSessions: () => Promise<unknown[]>
+  getSessions: () => Promise<SessionsListPayload | TestSession[]>
   getSessionReport: (sessionId: string) => Promise<unknown>
   compareSessions: (baseId: string, targetId: string) => Promise<unknown>
 

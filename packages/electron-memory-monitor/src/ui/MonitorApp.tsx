@@ -38,16 +38,14 @@ const MonitorApp: React.FC = () => {
       </nav>
 
       <main className="monitor-main">
-        {/* 各页均保持挂载，仅用 display 切换，避免丢失会话状态、IPC 与列表滚动位置 */}
-        <div style={{ display: currentPage === 'dashboard' ? 'block' : 'none' }}>
-          <Dashboard paneVisible={currentPage === 'dashboard'} />
-        </div>
-        <div style={{ display: currentPage === 'report' ? 'block' : 'none' }}>
-          <Report paneVisible={currentPage === 'report'} />
-        </div>
-        <div style={{ display: currentPage === 'compare' ? 'block' : 'none' }}>
-          <Compare paneVisible={currentPage === 'compare'} />
-        </div>
+        {/*
+          仅挂载当前页：若三页同时 display:none 切换，Report/Compare 内 fixed、100vh、图表层
+          在部分 Electron/Chromium 下仍可能挡住命中测试，导致实时监控里「结束会话」点不动。
+          切换 Tab 会卸载非当前页（报告列表滚动位置会重置；进入页时会 refreshSessions）。
+        */}
+        {currentPage === 'dashboard' && <Dashboard paneVisible />}
+        {currentPage === 'report' && <Report paneVisible />}
+        {currentPage === 'compare' && <Compare paneVisible />}
       </main>
     </div>
   )

@@ -8,6 +8,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from './channels'
 import type { ElectronMemoryMonitor } from '../core/monitor'
+import type { RendererV8Detail } from '../types/snapshot'
 
 export class IPCMainHandler {
   private monitor: ElectronMemoryMonitor
@@ -24,11 +25,30 @@ export class IPCMainHandler {
     })
 
     ipcMain.handle(IPC_CHANNELS.SESSION_STOP, async () => {
-      return this.monitor.stopSession()
+      try {
+        const report = await this.monitor.stopSession()
+        if (!report) {
+          return { ok: false as const, reason: 'no_active_session' as const }
+        }
+        // 完整报告已写入磁盘；勿把整份 SessionReport 经 IPC 回传（体量大时易卡死/序列化失败）
+        return {
+          ok: true as const,
+          sessionId: report.sessionId,
+          label: report.label,
+          durationMs: report.duration,
+        }
+      } catch (err) {
+        console.error('[electron-memory-monitor] SESSION_STOP failed:', err)
+        return {
+          ok: false as const,
+          reason: 'error' as const,
+          message: err instanceof Error ? err.message : String(err),
+        }
+      }
     })
 
     ipcMain.handle(IPC_CHANNELS.SESSION_LIST, async () => {
-      return this.monitor.getSessions()
+      return this.monitor.getSessionsPayloadForIpc()
     })
 
     ipcMain.handle(IPC_CHANNELS.SESSION_REPORT, async (_event, sessionId: string) => {
@@ -61,7 +81,7 @@ export class IPCMainHandler {
     })
 
     ipcMain.handle(IPC_CHANNELS.GET_SESSIONS, async () => {
-      return this.monitor.getSessions()
+      return this.monitor.getSessionsPayloadForIpc()
     })
 
     // 导入导出
@@ -77,9 +97,12 @@ export class IPCMainHandler {
       return this.monitor.deleteSession(sessionId)
     })
 
-    // 渲染进程上报（可选）
-    ipcMain.on(IPC_CHANNELS.RENDERER_REPORT, (_event, detail) => {
-      this.monitor.updateRendererDetail(detail)
+    // 渲染进程上报（可选）；用 sender 绑定 webContentsId，避免多标签共用占位 id
+    ipcMain.on(IPC_CHANNELS.RENDERER_REPORT, (event, detail: RendererV8Detail) => {
+      this.monitor.updateRendererDetail({
+        ...detail,
+        webContentsId: event.sender.id,
+      })
     })
   }
 

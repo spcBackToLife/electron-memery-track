@@ -37,6 +37,12 @@ const MULTI_WINDOW_PARTITION = 'persist:multi-window'
 
 const monitor = new ElectronMemoryMonitor({
   openDashboardOnStart: true,
+  enableRendererDetail: true,
+  session: {
+    autoStartOnLaunch: true,
+    autoLabelPrefix: 'browser-sim-test',
+    autoDescription: '与 launcher 对齐的壳 + 标签页场景；自动测试仅打标不新开/结束会话',
+  },
   processLabels: {
     'Browser Sim Test': '浏览器模拟测试',
   },
@@ -458,11 +464,6 @@ ipcMain.handle(
 
     const { urls, openDelay, closeDelay, rounds } = options
 
-    monitor.startSession(
-      `browser-sim-test-autotest-r${rounds}`,
-      `自动测试: ${rounds} 轮, ${urls.length} 个URL, 打开间隔${openDelay}ms, 关闭间隔${closeDelay}ms`
-    )
-
     monitor.mark('autotest:start', { rounds, urlCount: urls.length, openDelay, closeDelay })
 
     try {
@@ -543,12 +544,6 @@ ipcMain.handle(
 
     monitor.mark('autotest:stop', { aborted: autotestAborted })
 
-    try {
-      await monitor.stopSession()
-    } catch {
-      // ignore
-    }
-
     controlView?.webContents.send('browser:auto-test-done')
     return { success: true }
   }
@@ -600,6 +595,21 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
     }
   })
 }
+
+let memoryMonitorQuitHandled = false
+app.on('before-quit', (e) => {
+  if (memoryMonitorQuitHandled) return
+  memoryMonitorQuitHandled = true
+  e.preventDefault()
+  void (async () => {
+    try {
+      await monitor.stopSession()
+    } catch (err) {
+      console.error('[browser-sim-test] 退出时 stopSession:', err)
+    }
+    app.exit(0)
+  })()
+})
 
 app.whenReady().then(() => {
   createMainWindow()

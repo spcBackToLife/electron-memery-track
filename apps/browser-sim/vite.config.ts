@@ -29,6 +29,20 @@ export default defineConfig({
           },
         },
       },
+      {
+        entry: 'electron/tab-preload.ts',
+        onstart(args) {
+          args.reload()
+        },
+        vite: {
+          build: {
+            outDir: 'dist-electron',
+            rollupOptions: {
+              external: ['electron', '@electron-memory/monitor'],
+            },
+          },
+        },
+      },
     ]),
     renderer(),
   ],

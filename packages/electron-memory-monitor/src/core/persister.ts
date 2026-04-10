@@ -86,13 +86,13 @@ export class DataPersister {
     }
   }
 
-  /** 获取所有会话列表 */
+  /** 获取所有会话列表（按 startTime 降序，最新在前；与索引写入顺序无关） */
   getSessions(): TestSession[] {
     const indexFile = path.join(this.storageDir, 'sessions.json')
     try {
       const content = fs.readFileSync(indexFile, 'utf-8')
       const index = JSON.parse(content) as SessionIndex
-      return index.sessions
+      return this.sortSessionsByStartDesc(index.sessions)
     } catch {
       return []
     }
@@ -231,10 +231,19 @@ export class DataPersister {
   private saveSessionIndex(sessions: TestSession[]): void {
     const indexFile = path.join(this.storageDir, 'sessions.json')
     const index: SessionIndex = {
-      sessions,
+      sessions: this.sortSessionsByStartDesc(sessions),
       lastUpdated: Date.now(),
     }
     fs.writeFileSync(indexFile, JSON.stringify(index, null, 2), 'utf-8')
+  }
+
+  /** 统一排序：startTime 新 → 旧（同毫秒时按 id 稳定排序） */
+  private sortSessionsByStartDesc(sessions: TestSession[]): TestSession[] {
+    return [...sessions].sort((a, b) => {
+      const t = b.startTime - a.startTime
+      if (t !== 0) return t
+      return String(b.id).localeCompare(String(a.id))
+    })
   }
 
   private ensureDirectory(dir: string): void {

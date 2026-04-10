@@ -21,7 +21,7 @@ export type {
   RendererV8Detail,
   EventMark,
 } from './types/snapshot'
-export type { TestSession, SessionIndex } from './types/session'
+export type { TestSession, SessionIndex, SessionsListPayload } from './types/session'
 export type { AnomalyEvent, AnomalySeverity, AnomalyCategory, AnomalyRule } from './types/anomaly'
 export type {
   SessionReport,
