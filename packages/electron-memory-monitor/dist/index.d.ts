@@ -20,7 +20,7 @@ interface ProcessMemoryInfo {
         idleWakeupsPerSecond: number;
     };
     memory: {
-        /** 工作集大小 (KB) - 进程实际使用的物理内存 */
+        /** 工作集大小 (KB) - 进程实际使用的物理内存（含共享页面） */
         workingSetSize: number;
         /** 峰值工作集 (KB) */
         peakWorkingSetSize: number;
@@ -30,6 +30,12 @@ interface ProcessMemoryInfo {
          * 已提交但未驻留 RAM 时可能大于 workingSetSize（例如 GPU 进程）。
          */
         privateBytes?: number;
+        /**
+         * 专用工作集 (KB)，即 Windows 任务管理器默认「内存」列对应的 WorkingSetPrivate。
+         * 仅在 Windows 平台可用，通过系统 API 获取。
+         * 该值 = 进程独占的、已驻留物理 RAM 的内存（不含共享 DLL 页面）。
+         */
+        privateWorkingSet?: number;
     };
     /** 仅渲染进程：关联的 webContents ID */
     webContentsId?: number;

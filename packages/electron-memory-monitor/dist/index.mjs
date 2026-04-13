@@ -1,6 +1,13 @@
+var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
+  get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
+}) : x)(function(x) {
+  if (typeof require !== "undefined") return require.apply(this, arguments);
+  throw Error('Dynamic require of "' + x + '" is not supported');
+});
+
 // src/core/monitor.ts
 import { app as app3 } from "electron";
-import * as path4 from "path";
+import * as path5 from "path";
 import * as v82 from "v8";
 import { EventEmitter as EventEmitter3 } from "events";
 
@@ -9,6 +16,124 @@ import { app, BrowserWindow, webContents } from "electron";
 import * as v8 from "v8";
 import * as os from "os";
 import { EventEmitter } from "events";
+
+// src/core/native-memory.ts
+import { execFile } from "child_process";
+import * as path from "path";
+var IS_WINDOWS = process.platform === "win32";
+var nativeModule = null;
+var nativeLoadError = null;
+function tryLoadNative() {
+  if (!IS_WINDOWS) return null;
+  const possiblePaths = [
+    // Published SDK: dist/native/memory_native.node (copied during build)
+    path.join(__dirname, "native", "memory_native.node"),
+    // Published SDK alternative: native/build/Release/
+    path.join(__dirname, "..", "native", "build", "Release", "memory_native.node"),
+    // Development (source): ../../native/build/Release/
+    path.join(__dirname, "..", "..", "native", "build", "Release", "memory_native.node")
+  ];
+  for (const p of possiblePaths) {
+    try {
+      const mod = __require(p);
+      if (typeof mod.batchGetPrivateWorkingSet === "function") {
+        console.log(`[MemoryMonitor] Native module loaded from: ${p}`);
+        return mod;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+try {
+  nativeModule = tryLoadNative();
+  if (nativeModule) {
+    console.log("[MemoryMonitor] Native memory module loaded successfully");
+  } else if (IS_WINDOWS) {
+    nativeLoadError = "Native module not found, falling back to PowerShell/WMI";
+    console.warn(`[MemoryMonitor] ${nativeLoadError}`);
+  }
+} catch (e) {
+  nativeLoadError = String(e);
+  console.warn(`[MemoryMonitor] Failed to load native module: ${nativeLoadError}`);
+}
+function queryPrivateWorkingSetPowerShell(pids) {
+  if (!IS_WINDOWS || pids.length === 0) return Promise.resolve(/* @__PURE__ */ new Map());
+  return new Promise((resolve2) => {
+    const pidFilter = pids.join(",");
+    const wmiScript = `Get-CimInstance Win32_Process -Filter "ProcessId IN (${pidFilter})" -Property ProcessId,WorkingSetPrivate -ErrorAction SilentlyContinue | ForEach-Object { "$($_.ProcessId),$([Math]::Floor($_.WorkingSetPrivate / 1024))" }`;
+    execFile(
+      "powershell.exe",
+      ["-NoProfile", "-NoLogo", "-Command", wmiScript],
+      { timeout: 3e3 },
+      (err, stdout) => {
+        if (err) {
+          resolve2(/* @__PURE__ */ new Map());
+          return;
+        }
+        const map = /* @__PURE__ */ new Map();
+        const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+        for (const line of lines) {
+          const parts = line.trim().split(",");
+          if (parts.length >= 2) {
+            const pid = parseInt(parts[0], 10);
+            const kb = parseInt(parts[1], 10);
+            if (!isNaN(pid) && !isNaN(kb)) {
+              map.set(pid, kb);
+            }
+          }
+        }
+        resolve2(map);
+      }
+    );
+  });
+}
+function createPrivateWsProvider() {
+  if (nativeModule) {
+    const mod = nativeModule;
+    return {
+      backend: "native",
+      available: true,
+      queryPrivateWorkingSet: async (pids) => {
+        if (pids.length === 0) return /* @__PURE__ */ new Map();
+        try {
+          const result = mod.batchGetPrivateWorkingSet(pids);
+          const map = /* @__PURE__ */ new Map();
+          for (const [pidStr, bytes] of Object.entries(result)) {
+            const pid = parseInt(pidStr, 10);
+            if (!isNaN(pid) && bytes >= 0) {
+              map.set(pid, Math.floor(bytes / 1024));
+            }
+          }
+          return map;
+        } catch {
+          return /* @__PURE__ */ new Map();
+        }
+      }
+    };
+  }
+  if (IS_WINDOWS) {
+    return {
+      backend: "powershell",
+      available: true,
+      queryPrivateWorkingSet: queryPrivateWorkingSetPowerShell
+    };
+  }
+  return {
+    backend: "none",
+    available: false,
+    queryPrivateWorkingSet: async () => /* @__PURE__ */ new Map()
+  };
+}
+function getNativeModuleStatus() {
+  return {
+    loaded: nativeModule !== null,
+    backend: nativeModule ? "native (C++)" : IS_WINDOWS ? "powershell (fallback)" : "none",
+    error: nativeLoadError
+  };
+}
+
+// src/core/collector.ts
 var MemoryCollector = class extends EventEmitter {
   constructor(config) {
     super();
@@ -18,7 +143,19 @@ var MemoryCollector = class extends EventEmitter {
     this.pendingMarks = [];
     this.rendererDetails = /* @__PURE__ */ new Map();
     this.monitorWindowId = null;
+    /**
+     * 最近一次通过系统 API 查询到的各 PID 专用工作集缓存 (PID → KB)。
+     * 由于系统查询有一定延迟，采用异步刷新 + 缓存策略，不阻塞主采集循环。
+     */
+    this.privateWsCache = /* @__PURE__ */ new Map();
+    /** 上次刷新 privateWsCache 的时间戳 */
+    this.privateWsLastRefresh = 0;
+    /** privateWsCache 刷新间隔 (ms)，与采集间隔对齐但不能太频繁 */
+    this.privateWsRefreshInterval = 2e3;
     this.config = config;
+    this.privateWsProvider = createPrivateWsProvider();
+    const status = getNativeModuleStatus();
+    console.log(`[MemoryCollector] Private WS backend: ${status.backend}${status.error ? ` (${status.error})` : ""}`);
   }
   /** 设置监控面板的 webContents ID，用于标记 */
   setMonitorWindowId(id) {
@@ -43,6 +180,7 @@ var MemoryCollector = class extends EventEmitter {
   /** 开始采集 */
   start() {
     if (this.timer) return;
+    this.privateWsRefreshInterval = this.privateWsProvider.backend === "native" ? Math.max(500, this.config.collectInterval) : Math.max(2e3, this.config.collectInterval * 2);
     this.collect();
     this.timer = setInterval(() => {
       this.collect();
@@ -112,7 +250,8 @@ var MemoryCollector = class extends EventEmitter {
       } catch {
       }
     }
-    return metrics.map((metric) => {
+    const allPids = metrics.map((m) => m.pid);
+    const result = metrics.map((metric) => {
       const wc = pidToWc.get(metric.pid);
       let windowTitle;
       let webContentsId;
@@ -141,12 +280,31 @@ var MemoryCollector = class extends EventEmitter {
         memory: {
           workingSetSize: metric.memory.workingSetSize,
           peakWorkingSetSize: metric.memory.peakWorkingSetSize,
-          privateBytes: metric.memory.privateBytes
+          privateBytes: metric.memory.privateBytes,
+          privateWorkingSet: this.privateWsCache.get(metric.pid)
         },
         webContentsId,
         windowTitle
       };
       return info;
+    });
+    this.maybeRefreshPrivateWs(allPids);
+    return result;
+  }
+  /**
+   * 异步刷新专用工作集缓存。
+   * 按 privateWsRefreshInterval 节流，刷新完成后下一次 collect 自动使用新数据。
+   * 底层自动选择 Native C++ 或 PowerShell fallback。
+   */
+  maybeRefreshPrivateWs(pids) {
+    const now = Date.now();
+    if (!this.privateWsProvider.available || now - this.privateWsLastRefresh < this.privateWsRefreshInterval) return;
+    this.privateWsLastRefresh = now;
+    this.privateWsProvider.queryPrivateWorkingSet(pids).then((map) => {
+      if (map.size > 0) {
+        this.privateWsCache = map;
+      }
+    }).catch(() => {
     });
   }
   /** 采集主进程 Node.js 内存 */
@@ -206,7 +364,7 @@ var MemoryCollector = class extends EventEmitter {
 
 // src/core/persister.ts
 import * as fs from "fs";
-import * as path from "path";
+import * as path2 from "path";
 var DataPersister = class {
   constructor(config, storageDir) {
     this.buffer = [];
@@ -222,10 +380,10 @@ var DataPersister = class {
   }
   /** 创建新的会话数据文件 */
   createSessionFiles(sessionId) {
-    const sessionDir = path.join(this.storageDir, sessionId);
+    const sessionDir = path2.join(this.storageDir, sessionId);
     this.ensureDirectory(sessionDir);
-    const dataFile = path.join(sessionDir, "snapshots.jsonl");
-    const metaFile = path.join(sessionDir, "meta.json");
+    const dataFile = path2.join(sessionDir, "snapshots.jsonl");
+    const metaFile = path2.join(sessionDir, "meta.json");
     this.closeStream();
     this.currentDataFile = dataFile;
     this.currentStream = fs.createWriteStream(dataFile, { flags: "a" });
@@ -247,13 +405,13 @@ var DataPersister = class {
   }
   /** 保存会话元信息 */
   saveSessionMeta(session) {
-    const metaFile = path.join(this.storageDir, session.id, "meta.json");
+    const metaFile = path2.join(this.storageDir, session.id, "meta.json");
     fs.writeFileSync(metaFile, JSON.stringify(session, null, 2), "utf-8");
     this.updateSessionIndex(session);
   }
   /** 读取会话元信息 */
   readSessionMeta(sessionId) {
-    const metaFile = path.join(this.storageDir, sessionId, "meta.json");
+    const metaFile = path2.join(this.storageDir, sessionId, "meta.json");
     try {
       const content = fs.readFileSync(metaFile, "utf-8");
       return JSON.parse(content);
@@ -263,7 +421,7 @@ var DataPersister = class {
   }
   /** 获取所有会话列表（按 startTime 降序，最新在前；与索引写入顺序无关） */
   getSessions() {
-    const indexFile = path.join(this.storageDir, "sessions.json");
+    const indexFile = path2.join(this.storageDir, "sessions.json");
     try {
       const content = fs.readFileSync(indexFile, "utf-8");
       const index = JSON.parse(content);
@@ -274,7 +432,7 @@ var DataPersister = class {
   }
   /** 读取会话的所有快照数据 */
   readSessionSnapshots(sessionId) {
-    const dataFile = path.join(this.storageDir, sessionId, "snapshots.jsonl");
+    const dataFile = path2.join(this.storageDir, sessionId, "snapshots.jsonl");
     try {
       const content = fs.readFileSync(dataFile, "utf-8");
       const lines = content.trim().split("\n").filter(Boolean);
@@ -294,7 +452,7 @@ var DataPersister = class {
     if (sessions.length <= this.config.storage.maxSessions) return;
     const toRemove = sessions.sort((a, b) => a.startTime - b.startTime).slice(0, sessions.length - this.config.storage.maxSessions);
     for (const session of toRemove) {
-      const sessionDir = path.join(this.storageDir, session.id);
+      const sessionDir = path2.join(this.storageDir, session.id);
       try {
         fs.rmSync(sessionDir, { recursive: true, force: true });
       } catch {
@@ -306,8 +464,8 @@ var DataPersister = class {
   /** 导出会话数据为单个 JSON 包 */
   exportSession(sessionId) {
     const meta = this.readSessionMeta(sessionId);
-    const snapshotsFile = path.join(this.storageDir, sessionId, "snapshots.jsonl");
-    const reportFile = path.join(this.storageDir, sessionId, "report.json");
+    const snapshotsFile = path2.join(this.storageDir, sessionId, "snapshots.jsonl");
+    const reportFile = path2.join(this.storageDir, sessionId, "report.json");
     let snapshots = "";
     try {
       snapshots = fs.readFileSync(snapshotsFile, "utf-8");
@@ -323,15 +481,15 @@ var DataPersister = class {
   /** 导入会话数据 */
   importSession(data) {
     const { meta, snapshots, report } = data;
-    const sessionDir = path.join(this.storageDir, meta.id);
+    const sessionDir = path2.join(this.storageDir, meta.id);
     this.ensureDirectory(sessionDir);
-    const snapshotsFile = path.join(sessionDir, "snapshots.jsonl");
+    const snapshotsFile = path2.join(sessionDir, "snapshots.jsonl");
     fs.writeFileSync(snapshotsFile, snapshots, "utf-8");
     meta.dataFile = snapshotsFile;
-    meta.metaFile = path.join(sessionDir, "meta.json");
+    meta.metaFile = path2.join(sessionDir, "meta.json");
     fs.writeFileSync(meta.metaFile, JSON.stringify(meta, null, 2), "utf-8");
     if (report) {
-      const reportFile = path.join(sessionDir, "report.json");
+      const reportFile = path2.join(sessionDir, "report.json");
       fs.writeFileSync(reportFile, report, "utf-8");
     }
     this.updateSessionIndex(meta);
@@ -339,7 +497,7 @@ var DataPersister = class {
   }
   /** 删除指定会话 */
   deleteSession(sessionId) {
-    const sessionDir = path.join(this.storageDir, sessionId);
+    const sessionDir = path2.join(this.storageDir, sessionId);
     try {
       fs.rmSync(sessionDir, { recursive: true, force: true });
     } catch {
@@ -368,7 +526,7 @@ var DataPersister = class {
     this.saveSessionIndex(sessions);
   }
   saveSessionIndex(sessions) {
-    const indexFile = path.join(this.storageDir, "sessions.json");
+    const indexFile = path2.join(this.storageDir, "sessions.json");
     const index = {
       sessions: this.sortSessionsByStartDesc(sessions),
       lastUpdated: Date.now()
@@ -1219,12 +1377,12 @@ var Analyzer = class {
 
 // src/core/dashboard.ts
 import { BrowserWindow as BrowserWindow2 } from "electron";
-import * as path3 from "path";
+import * as path4 from "path";
 
 // src/core/dashboard-protocol.ts
 import { app as app2, net, protocol } from "electron";
 import { readFile } from "fs/promises";
-import * as path2 from "path";
+import * as path3 from "path";
 import { pathToFileURL } from "url";
 var SCHEME = "emm-dashboard";
 var privilegedRegistered = false;
@@ -1249,13 +1407,13 @@ var MIME_BY_EXT = {
   ".txt": "text/plain; charset=utf-8"
 };
 function isPathInsideRoot(filePath, root) {
-  const f = path2.resolve(filePath);
-  const r = path2.resolve(root);
+  const f = path3.resolve(filePath);
+  const r = path3.resolve(root);
   if (f === r) {
     return true;
   }
-  const rel = path2.relative(r, f);
-  if (!rel || rel.startsWith("..") || path2.isAbsolute(rel)) {
+  const rel = path3.relative(r, f);
+  if (!rel || rel.startsWith("..") || path3.isAbsolute(rel)) {
     return false;
   }
   return true;
@@ -1337,7 +1495,7 @@ function ensureDashboardProtocolHandler(uiRoot) {
     );
   }
   handlerRegistered = true;
-  const base = path2.resolve(uiRoot);
+  const base = path3.resolve(uiRoot);
   protocol.handle(SCHEME, async (request) => {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: corsHeaders() });
@@ -1347,7 +1505,7 @@ function ensureDashboardProtocolHandler(uiRoot) {
       if (!rel || rel.includes("..")) {
         return new Response("Bad path", { status: 400, headers: corsHeaders() });
       }
-      const filePath = path2.resolve(path2.join(base, ...rel.split("/")));
+      const filePath = path3.resolve(path3.join(base, ...rel.split("/")));
       if (!isPathInsideRoot(filePath, base)) {
         return new Response("Forbidden", { status: 403, headers: corsHeaders() });
       }
@@ -1365,7 +1523,7 @@ function ensureDashboardProtocolHandler(uiRoot) {
         const ab = await upstream.arrayBuffer();
         buf = Buffer.from(ab);
       }
-      const ext = path2.extname(filePath).toLowerCase();
+      const ext = path3.extname(filePath).toLowerCase();
       if (ext === ".html" && !looksLikeHtml(buf)) {
         console.error(
           "[@electron-memory/monitor] emm-dashboard: not HTML at",
@@ -1463,7 +1621,7 @@ var DashboardManager = class {
       this.window.focus();
       return;
     }
-    const preloadPath = path3.join(__dirname, "dashboard-preload.js");
+    const preloadPath = path4.join(__dirname, "dashboard-preload.js");
     this.window = new BrowserWindow2({
       width: this.config.dashboard.width,
       height: this.config.dashboard.height,
@@ -1479,7 +1637,7 @@ var DashboardManager = class {
     attachDashboardWindowHooks(this.window, {
       openDevToolsOnStart: this.config.dashboard.openDevToolsOnStart
     });
-    const uiRoot = path3.join(__dirname, "ui");
+    const uiRoot = path4.join(__dirname, "ui");
     ensureDashboardProtocolHandler(uiRoot);
     this.window.loadURL(getDashboardPageURL());
     this.window.on("closed", () => {
@@ -1723,7 +1881,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
     if (!app3.isReady()) {
       await app3.whenReady();
     }
-    const storageDir = this.config.storage.directory || path4.join(app3.getPath("userData"), "memory-monitor");
+    const storageDir = this.config.storage.directory || path5.join(app3.getPath("userData"), "memory-monitor");
     this.persister = new DataPersister(this.config, storageDir);
     this.sessionManager = new SessionManager(this.persister);
     this.ipcHandler = new IPCMainHandler(this);
@@ -1806,7 +1964,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
   /** 为已落盘元数据的会话生成并写入 report.json（显式结束或被新会话顶替） */
   async persistCompletedSessionReport(completedSession, anomalies) {
     const fs2 = await import("fs/promises");
-    const snapshotsPath = path4.join(
+    const snapshotsPath = path5.join(
       this.persister.getStorageDir(),
       completedSession.id,
       "snapshots.jsonl"
@@ -1829,7 +1987,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
       anomalies,
       completedSession.dataFile
     );
-    const reportPath = path4.join(this.persister.getStorageDir(), completedSession.id, "report.json");
+    const reportPath = path5.join(this.persister.getStorageDir(), completedSession.id, "report.json");
     await fs2.writeFile(reportPath, JSON.stringify(report, null, 2), "utf-8");
     this.emit("session-end", report);
     return report;
@@ -1870,7 +2028,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
   /** 获取指定会话报告 */
   async getSessionReport(sessionId) {
     const fs2 = await import("fs");
-    const reportPath = path4.join(this.persister.getStorageDir(), sessionId, "report.json");
+    const reportPath = path5.join(this.persister.getStorageDir(), sessionId, "report.json");
     try {
       const content = fs2.readFileSync(reportPath, "utf-8");
       return JSON.parse(content);
@@ -2014,7 +2172,7 @@ var ElectronMemoryMonitor = class extends EventEmitter3 {
   }
   /** 导出堆快照 */
   async takeHeapSnapshot(filePath) {
-    const snapshotPath = filePath || path4.join(
+    const snapshotPath = filePath || path5.join(
       this.persister.getStorageDir(),
       `heap-${Date.now()}.heapsnapshot`
     );

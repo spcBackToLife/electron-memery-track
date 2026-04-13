@@ -1,6 +1,6 @@
 {
   "name": "@electron-memory/monitor",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Electron memory profiling SDK - zero-intrusion memory monitoring, anomaly detection, and regression analysis",
   "main": "dist/index.js",
   "module": "dist/index.mjs",
@@ -18,14 +18,23 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "native/build/Release/memory_native.node",
+    "native/binding.gyp",
+    "native/src",
+    "native/package.json"
   ],
   "scripts": {
-    "build": "tsup && vite build",
+    "build": "tsup && vite build && npm run build:native:electron && npm run build:native:copy",
     "build:node": "tsup",
     "build:ui": "vite build",
+    "build:native": "cd native && npm install --ignore-scripts && npx node-gyp rebuild",
+    "build:native:electron": "cd native && npm install --ignore-scripts && npx node-gyp rebuild --target=33.2.1 --arch=x64 --dist-url=https://electronjs.org/headers",
+    "build:native:copy": "node -e \"const fs=require('fs');const p=require('path');const src=p.join('native','build','Release','memory_native.node');const dir=p.join('dist','native');if(fs.existsSync(dir)||fs.mkdirSync(dir,{recursive:true}),fs.existsSync(src)){fs.copyFileSync(src,p.join(dir,'memory_native.node'));console.log('Copied memory_native.node to dist/native/')}else{console.warn('WARNING: memory_native.node not found, native module will not be available')}\"",
+    "build:skip-native": "tsup && vite build && npm run build:native:copy",
     "dev": "tsup --watch",
-    "clean": "rimraf dist"
+    "clean": "rimraf dist",
+    "rebuild:native": "cd native && npm install --ignore-scripts && npx node-gyp rebuild --target=33.2.1 --arch=x64 --dist-url=https://electronjs.org/headers"
   },
   "peerDependencies": {
     "electron": ">=20.0.0"

@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="..">
+      <UniqueIdentifier>{739DB09A-CC57-A953-A6CF-F64FA08E4FA7}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="..\src">
+      <UniqueIdentifier>{8CDEE807-BC53-E450-C8B8-4DEBB66742D4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:">
+      <UniqueIdentifier>{7B735499-E5DD-1C2B-6C26-70023832A1CF}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:\my-work">
+      <UniqueIdentifier>{DBA32298-24BB-E730-767D-671152F17F25}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:\my-work\electron-memery-demo">
+      <UniqueIdentifier>{B37F697C-762E-6DA7-0922-4928D84C83DA}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:\my-work\electron-memery-demo\packages">
+      <UniqueIdentifier>{E7CD080E-1BF3-5BDD-EDD5-5A207EF07A45}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:\my-work\electron-memery-demo\packages\electron-memory-monitor">
+      <UniqueIdentifier>{29A71B51-24CD-A604-604A-C68321D912B5}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:\my-work\electron-memery-demo\packages\electron-memory-monitor\native">
+      <UniqueIdentifier>{D56EDB24-21BF-8816-5D92-25C635122F26}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:\my-work\electron-memery-demo\packages\electron-memory-monitor\native\node_modules">
+      <UniqueIdentifier>{56DF7A98-063D-FB9D-485C-089023B4C16A}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:\my-work\electron-memery-demo\packages\electron-memory-monitor\native\node_modules\node-gyp">
+      <UniqueIdentifier>{77348C0E-2034-7791-74D5-63C077DF5A3B}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="C:\my-work\electron-memery-demo\packages\electron-memory-monitor\native\node_modules\node-gyp\src">
+      <UniqueIdentifier>{8CDEE807-BC53-E450-C8B8-4DEBB66742D4}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="..">
+      <UniqueIdentifier>{739DB09A-CC57-A953-A6CF-F64FA08E4FA7}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\memory_native.cc">
+      <Filter>..\src</Filter>
+    </ClCompile>
+    <ClCompile Include="C:\my-work\electron-memery-demo\packages\electron-memory-monitor\native\node_modules\node-gyp\src\win_delay_load_hook.cc">
+      <Filter>C:\my-work\electron-memery-demo\packages\electron-memory-monitor\native\node_modules\node-gyp\src</Filter>
+    </ClCompile>
+    <None Include="..\binding.gyp">
+      <Filter>..</Filter>
+    </None>
+  </ItemGroup>
+</Project>

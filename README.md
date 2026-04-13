@@ -77,6 +77,20 @@ npm install @electron-memory/monitor
 yarn add @electron-memory/monitor
 ```
 
+### Native Module (Windows — Accurate Private Working Set)
+
+The SDK includes a pre-compiled C++ native addon that provides **exact Private Working Set** data (matching Windows Task Manager). It loads automatically — no extra setup needed.
+
+If you need to rebuild for a different Electron version:
+
+```bash
+cd node_modules/@electron-memory/monitor/native
+npm install --ignore-scripts
+npx node-gyp rebuild --target=<YOUR_ELECTRON_VERSION> --arch=x64 --dist-url=https://electronjs.org/headers
+```
+
+> **Prerequisites**: Python 3.x + Visual Studio Build Tools (C++ workload). If native module is unavailable, the SDK falls back to PowerShell/WMI automatically.
+
 ### Basic Usage (Level 1: Zero Intrusion)
 
 Add **just one line** to your Electron main process:
@@ -289,7 +303,8 @@ ElectronMemoryMonitor (Facade)
 │   ├── process.memoryUsage()     → Main process Node.js memory
 │   ├── v8.getHeapStatistics()    → Main process V8 details
 │   ├── v8.getHeapSpaceStatistics() → V8 heap spaces
-│   └── os.totalmem() / freemem() → System memory
+│   ├── os.totalmem() / freemem() → System memory
+│   └── NativeMemory (C++ addon)  → Exact Private Working Set (Windows)
 │
 ├── DataPersister            — JSONL streaming storage with buffered writes
 ├── SessionManager           — Session lifecycle & index management
@@ -476,6 +491,10 @@ electron-memory-monitor/
 │       │   ├── preload/
 │       │   │   └── inject.ts             # Optional renderer reporter
 │       │   └── types/                    # TypeScript type definitions
+│       ├── native/                       # C++ native addon (Windows)
+│       │   ├── src/memory_native.cc      # Win32 API memory collection
+│       │   ├── binding.gyp               # node-gyp build config
+│       │   └── README.md                 # Native module docs
 │       ├── tsup.config.ts                # Build config (CJS + ESM)
 │       └── package.json
 │
@@ -496,6 +515,56 @@ electron-memory-monitor/
 ├── images/                               # Screenshots
 └── MEMORY_PROFILING_DESIGN.md            # Detailed design document
 ```
+
+---
+
+## 📦 Packaging Your Electron App
+
+When packaging your Electron app (with electron-builder, electron-forge, etc.), the native `.node` addon needs special handling:
+
+### electron-builder
+
+Add `asarUnpack` to your build config so `.node` files are extracted from the asar archive:
+
+```yaml
+# electron-builder.yml
+asarUnpack:
+  - "node_modules/@electron-memory/monitor/dist/native/**"
+  - "node_modules/@electron-memory/monitor/native/build/Release/**"
+```
+
+### electron-forge
+
+```javascript
+// forge.config.js
+module.exports = {
+  packagerConfig: {
+    asar: {
+      unpack: '{**/node_modules/@electron-memory/monitor/dist/native/**,**/node_modules/@electron-memory/monitor/native/build/Release/**}'
+    }
+  }
+}
+```
+
+### vite-plugin-electron
+
+Externalize native modules in your Vite config:
+
+```typescript
+// vite.config.ts
+electron({
+  entry: 'electron/main.ts',
+  vite: {
+    build: {
+      rollupOptions: {
+        external: [/\.node$/, '@electron-memory/monitor'],
+      },
+    },
+  },
+})
+```
+
+> See [SDK README](./packages/electron-memory-monitor/README.md) for detailed packaging instructions.
 
 ---
 

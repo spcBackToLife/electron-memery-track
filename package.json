@@ -16,6 +16,7 @@
     "dev:browser-sim-test": "pnpm --filter @electron-benchmark/browser-sim-test dev",
     "dev:demo": "pnpm --filter @electron-benchmark/electron-demo dev",
     "build:sdk": "pnpm --filter @electron-memory/monitor build",
+    "build:sdk:skip-native": "pnpm --filter @electron-memory/monitor run build:skip-native",
     "build:all": "pnpm build:sdk && pnpm -r --filter \"./apps/*\" build",
     "clean": "pnpm -r clean",
     "install:all": "pnpm install"
