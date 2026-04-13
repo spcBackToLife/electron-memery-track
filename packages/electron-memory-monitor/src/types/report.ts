@@ -184,6 +184,9 @@ export interface CompareReport {
   verdictReason: string
 }
 
+/** 主进程 GC 实际是否调用了 V8 的 global.gc（需 --expose-gc） */
+export type GCTriggerMode = 'explicit' | 'none'
+
 /** GC 结果 */
 export interface GCResult {
   beforeHeapUsed: number
@@ -191,4 +194,8 @@ export interface GCResult {
   freed: number
   freedPercent: number
   timestamp: number
+  /** explicit：已调用 global.gc；none：未暴露 gc，仅采样前后堆（曲线可能几乎不变） */
+  mode: GCTriggerMode
+  /** 供界面展示的简短说明（如如何启用真实 GC） */
+  hint?: string
 }

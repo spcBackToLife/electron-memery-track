@@ -7,6 +7,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from './channels'
 import type { SessionsListPayload, TestSession } from '../types/session'
+import type { GCResult } from '../types/report'
 
 /** 监控面板 preload 注入的 API 类型 */
 export interface MonitorPanelAPI {
@@ -26,7 +27,7 @@ export interface MonitorPanelAPI {
   deleteSession: (sessionId: string) => Promise<boolean>
 
   // 工具
-  triggerGC: () => Promise<unknown>
+  triggerGC: () => Promise<GCResult>
   takeHeapSnapshot: (filePath?: string) => Promise<string>
   addMark: (label: string, metadata?: Record<string, unknown>) => Promise<void>
   getConfig: () => Promise<unknown>

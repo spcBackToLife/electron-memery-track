@@ -30,6 +30,20 @@ export interface AnomalyEvent {
   value?: number
   /** 阈值 */
   threshold?: number
+  /** 排查建议列表 */
+  suggestions?: string[]
+  /** 可执行的快捷操作 */
+  actions?: AnomalyAction[]
+}
+
+/** 告警可附带的快捷操作 */
+export interface AnomalyAction {
+  /** 操作 ID */
+  id: string
+  /** 按钮文案 */
+  label: string
+  /** 操作类型 */
+  type: 'heap-snapshot' | 'trigger-gc' | 'open-devtools'
 }
 
 /** 异常检测规则 */

@@ -31,19 +31,32 @@ const getTypeName = (type: string): string => {
   }
 }
 
+/** Chromium privateBytes（KiB），语义为专用提交而非专用工作集 */
+const formatPrivate = (kb: number | undefined): string => {
+  if (kb == null || Number.isNaN(kb)) return '—'
+  return formatKB(kb)
+}
+
 const ProcessTable: React.FC<ProcessTableProps> = ({ processes }) => {
   const sorted = [...processes].sort((a, b) => b.memory.workingSetSize - a.memory.workingSetSize)
 
   return (
     <div className="process-table-container">
+      <p className="process-table-hint">
+        <strong>无法与任务管理器默认列逐项完全一致：</strong>系统界面用的是微软自己的汇总/列定义（常见为<strong>专用工作集</strong>），而 Electron{' '}
+        <code>getAppMetrics()</code> 只提供 Chromium 封装的两类数——<strong>工作集</strong>（驻留物理内存）与{' '}
+        <strong>专用提交</strong>（<code>privateBytes</code>，接近 Windows 的专用已提交量 PrivateUsage）。二者与「专用工作集」不是同一个 Win32 计数器。
+        已提交但未全在内存里时，<strong>专用提交可以大于工作集</strong>（截图里 GPU 即如此）。请按 <strong>PID</strong> 对照，并在任务管理器中通过「选择列」勾选<strong>工作集、专用工作集、提交大小</strong>逐列比对。
+      </p>
       <table className="process-table">
         <thead>
           <tr>
             <th>PID</th>
             <th>类型</th>
             <th>名称</th>
-            <th>工作集</th>
+            <th title="含共享映射，通常 ≥ 专用内存">工作集</th>
             <th>峰值</th>
+            <th title="privateBytes ≈ 专用已提交（非 TM 默认的专用工作集）；可能大于工作集">专用提交</th>
             <th>CPU</th>
           </tr>
         </thead>
@@ -65,6 +78,7 @@ const ProcessTable: React.FC<ProcessTableProps> = ({ processes }) => {
               </td>
               <td className="memory-value">{formatKB(proc.memory.workingSetSize)}</td>
               <td className="memory-value">{formatKB(proc.memory.peakWorkingSetSize)}</td>
+              <td className="memory-value memory-private">{formatPrivate(proc.memory.privateBytes)}</td>
               <td className="cpu-value">{proc.cpu.percentCPUUsage.toFixed(1)}%</td>
             </tr>
           ))}

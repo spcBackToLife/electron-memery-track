@@ -3,6 +3,8 @@ import type { Suggestion } from '../../types/report'
 
 interface SuggestionPanelProps {
   suggestions: Suggestion[]
+  onTakeHeapSnapshot?: () => void
+  onTriggerGC?: () => void
 }
 
 const severityConfig = {
@@ -11,7 +13,25 @@ const severityConfig = {
   critical: { icon: '🔴', color: '#ff4d4f' },
 }
 
-const SuggestionPanel: React.FC<SuggestionPanelProps> = ({ suggestions }) => {
+/** 根据建议内容判断是否应展示"堆快照"按钮 */
+const shouldShowHeapSnapshotBtn = (suggestion: Suggestion): boolean => {
+  const kws = ['堆快照', 'heap snapshot', 'Heap Snapshot', 'Detached']
+  const all = [suggestion.title, suggestion.description, ...suggestion.suggestions].join(' ')
+  return kws.some((kw) => all.includes(kw))
+}
+
+/** 根据建议内容判断是否应展示"GC"按钮 */
+const shouldShowGCBtn = (suggestion: Suggestion): boolean => {
+  const kws = ['GC', '垃圾回收', '触发 GC', '内存回落']
+  const all = [suggestion.title, suggestion.description, ...suggestion.suggestions].join(' ')
+  return kws.some((kw) => all.includes(kw))
+}
+
+const SuggestionPanel: React.FC<SuggestionPanelProps> = ({
+  suggestions,
+  onTakeHeapSnapshot,
+  onTriggerGC,
+}) => {
   if (suggestions.length === 0) {
     return (
       <div className="suggestion-panel-empty">
@@ -24,6 +44,10 @@ const SuggestionPanel: React.FC<SuggestionPanelProps> = ({ suggestions }) => {
     <div className="suggestion-panel">
       {suggestions.map((suggestion) => {
         const config = severityConfig[suggestion.severity]
+        const showHeap = onTakeHeapSnapshot && shouldShowHeapSnapshotBtn(suggestion)
+        const showGC = onTriggerGC && shouldShowGCBtn(suggestion)
+        const showActions = showHeap || showGC
+
         return (
           <div key={suggestion.id} className="suggestion-item" style={{ borderLeftColor: config.color }}>
             <div className="suggestion-header">
@@ -42,6 +66,20 @@ const SuggestionPanel: React.FC<SuggestionPanelProps> = ({ suggestions }) => {
                 {suggestion.relatedCode.map((code, i) => (
                   <code key={i}>{code}</code>
                 ))}
+              </div>
+            )}
+            {showActions && (
+              <div className="suggestion-actions">
+                {showHeap && (
+                  <button className="btn btn-sm suggestion-action-btn" onClick={onTakeHeapSnapshot}>
+                    📸 导出堆快照
+                  </button>
+                )}
+                {showGC && (
+                  <button className="btn btn-sm suggestion-action-btn" onClick={onTriggerGC}>
+                    🗑️ 触发 GC
+                  </button>
+                )}
               </div>
             )}
           </div>

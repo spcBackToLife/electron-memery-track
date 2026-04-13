@@ -21,7 +21,7 @@ import { DEFAULT_CONFIG, type MonitorConfig } from '../types/config'
 import type { MemorySnapshot, RendererV8Detail } from '../types/snapshot'
 import type { SessionsListPayload, TestSession } from '../types/session'
 import type { AnomalyEvent } from '../types/anomaly'
-import type { SessionReport, CompareReport, GCResult } from '../types/report'
+import type { SessionReport, CompareReport, GCResult, GCTriggerMode } from '../types/report'
 
 /** 降采样后把被丢弃快照上的 marks 合并到时间最近的保留点，避免历史趋势图丢竖线 */
 function mergeMarksFromExcludedSnapshots(
@@ -474,16 +474,11 @@ export class ElectronMemoryMonitor extends EventEmitter {
   /** 手动触发 GC */
   async triggerGC(): Promise<GCResult> {
     const beforeMem = process.memoryUsage()
+    let mode: GCTriggerMode = 'none'
 
-    if (global.gc) {
+    if (typeof global.gc === 'function') {
       global.gc()
-    } else {
-      // 尝试通过 v8 flag 触发
-      try {
-        v8.writeHeapSnapshot // 触发 GC 的 workaround
-      } catch {
-        // 忽略
-      }
+      mode = 'explicit'
     }
 
     // 等待一小段时间让 GC 完成
@@ -492,12 +487,19 @@ export class ElectronMemoryMonitor extends EventEmitter {
     const afterMem = process.memoryUsage()
     const freed = beforeMem.heapUsed - afterMem.heapUsed
 
+    const hint =
+      mode === 'none'
+        ? '当前未启用 global.gc。请用启动参数 --js-flags="--expose-gc"（或 NODE_OPTIONS 含 --expose-gc）启动 Electron，GC 按钮才会强制回收主进程 V8 堆；未启用时总工作集/子进程曲线通常几乎不变。'
+        : undefined
+
     return {
       beforeHeapUsed: beforeMem.heapUsed,
       afterHeapUsed: afterMem.heapUsed,
       freed,
       freedPercent: beforeMem.heapUsed > 0 ? (freed / beforeMem.heapUsed) * 100 : 0,
       timestamp: Date.now(),
+      mode,
+      hint,
     }
   }
 

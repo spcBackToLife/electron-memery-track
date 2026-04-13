@@ -32,6 +32,13 @@ var IPC_CHANNELS = {
 
 // src/preload/inject.ts
 function injectRendererReporter(interval = 2e3) {
+  if (typeof process === "undefined" || typeof process.memoryUsage !== "function") {
+    console.warn(
+      "[@electron-memory/monitor] injectRendererReporter \u9700\u8981 Node \u7684 process.memoryUsage\u3002Electron \u5728 webPreferences.sandbox=true\uFF08\u6216\u9ED8\u8BA4\u6C99\u7BB1\uFF09\u7684 preload \u91CC\u4E0D\u63D0\u4F9B process\uFF0C\u4E0A\u62A5\u4E0D\u4F1A\u751F\u6548\u3002\u8BF7\u5C06\u4E1A\u52A1 WebContents \u8BBE\u4E3A sandbox: false\uFF0C\u6216\u4E3A\u8BE5\u7A97\u53E3\u5173\u95ED\u6C99\u7BB1\u3002"
+    );
+    return () => {
+    };
+  }
   let timer = null;
   const report = () => {
     try {
@@ -45,7 +52,8 @@ function injectRendererReporter(interval = 2e3) {
         external: mem.external,
         arrayBuffers: mem.arrayBuffers
       });
-    } catch {
+    } catch (err) {
+      console.warn("[@electron-memory/monitor] injectRendererReporter \u4E0A\u62A5\u5931\u8D25:", err);
     }
   };
   ipcRenderer.on(IPC_CHANNELS.RENDERER_REQUEST, () => {

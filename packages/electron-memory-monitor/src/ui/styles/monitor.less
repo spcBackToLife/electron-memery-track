@@ -104,6 +104,14 @@ html, body {
 }
 
 // ===== 进程表格 =====
+.process-table-hint {
+  font-size: 11px; color: @text-secondary; line-height: 1.5; margin: 0 0 10px;
+  code {
+    font-size: 10px; padding: 1px 4px; border-radius: 3px;
+    background: rgba(0, 0, 0, 0.35); font-family: ui-monospace, monospace;
+  }
+}
+
 .process-table-container { overflow-x: auto; }
 
 .process-table {
@@ -122,6 +130,7 @@ html, body {
 
   .pid { font-family: monospace; color: @text-secondary; }
   .memory-value { font-family: monospace; color: @info-color; }
+  .memory-private { color: @success-color; }
   .cpu-value { font-family: monospace; }
   .process-name { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
@@ -312,11 +321,57 @@ select {
 
 .alert-item {
   padding: 10px 12px; border-radius: @radius; border-left: 3px solid;
-  &-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  transition: all 0.2s;
+
+  &-expanded { background: rgba(255, 255, 255, 0.04) !important; }
+
+  &-header {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+  }
   &-icon { font-size: 14px; }
   &-title { font-size: 13px; font-weight: 500; flex: 1; }
   &-time { font-size: 11px; color: @text-secondary; }
   &-desc { font-size: 12px; color: @text-secondary; }
+  &-toggle { font-size: 12px; color: @text-secondary; user-select: none; min-width: 14px; text-align: center; }
+}
+
+.alert-item-detail {
+  margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.alert-suggestions {
+  margin-bottom: 10px;
+
+  &-title {
+    font-size: 12px; font-weight: 600; color: @text-primary; margin-bottom: 6px;
+  }
+  &-list {
+    list-style: none; padding: 0; margin: 0;
+    li {
+      padding: 3px 0 3px 16px; font-size: 12px; color: @text-secondary;
+      position: relative; line-height: 1.5;
+      &::before {
+        content: '•'; position: absolute; left: 4px; color: @primary-color;
+      }
+    }
+  }
+}
+
+.alert-actions {
+  &-title {
+    font-size: 12px; font-weight: 600; color: @text-primary; margin-bottom: 6px;
+  }
+  &-btns {
+    display: flex; gap: 8px; flex-wrap: wrap;
+  }
+}
+
+.alert-action-btn {
+  background: rgba(100, 108, 255, 0.15); border-color: rgba(100, 108, 255, 0.3);
+  color: #a5abff; font-size: 12px;
+  &:hover:not(:disabled) {
+    background: rgba(100, 108, 255, 0.25); border-color: @primary-color; color: white;
+  }
 }
 
 // ===== 建议面板 =====
@@ -354,6 +409,19 @@ select {
     display: block; background: rgba(0, 0, 0, 0.3); padding: 6px 10px;
     border-radius: 4px; font-size: 12px; color: @success-color;
     margin-bottom: 4px; font-family: monospace;
+  }
+}
+
+.suggestion-actions {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px;
+  padding-top: 10px; border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.suggestion-action-btn {
+  background: rgba(100, 108, 255, 0.15); border-color: rgba(100, 108, 255, 0.3);
+  color: #a5abff; font-size: 12px;
+  &:hover:not(:disabled) {
+    background: rgba(100, 108, 255, 0.25); border-color: @primary-color; color: white;
   }
 }
 
@@ -735,6 +803,32 @@ select {
 .anomaly-time { font-size: 11px; color: @text-secondary; min-width: 70px; }
 .anomaly-title { font-size: 13px; font-weight: 500; }
 .anomaly-desc { font-size: 12px; color: @text-secondary; }
+
+// ===== 轻量 Toast（GC / 操作反馈）=====
+.emm-toast-host {
+  position: fixed; right: 16px; bottom: 16px; z-index: 99999;
+  display: flex; flex-direction: column; gap: 10px; max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.emm-toast {
+  padding: 12px 14px; border-radius: @radius; font-size: 13px; line-height: 1.45;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45); border: 1px solid @card-border;
+  white-space: pre-wrap; word-break: break-word;
+  animation: emm-toast-in 0.22s ease-out;
+}
+.emm-toast-success {
+  background: rgba(82, 196, 26, 0.18); border-left: 4px solid @success-color; color: @text-primary;
+}
+.emm-toast-error {
+  background: rgba(255, 77, 79, 0.15); border-left: 4px solid @danger-color; color: #ffccc7;
+}
+.emm-toast-info {
+  background: rgba(24, 144, 255, 0.12); border-left: 4px solid @info-color; color: @text-primary;
+}
+@keyframes emm-toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 
 // ===== Scrollbar =====
 ::-webkit-scrollbar { width: 6px; }

@@ -226,6 +226,8 @@ ipcMain.handle('browser:open-tab', async (_event, url: string) => {
       preload: TAB_PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
+      /** 与 injectRendererReporter 一致：沙箱 preload 无 process.memoryUsage，无法上报渲染 V8 */
+      sandbox: false,
     },
   })
 
@@ -327,6 +329,7 @@ ipcMain.handle(
           preload: TAB_PRELOAD_PATH,
           contextIsolation: true,
           nodeIntegration: false,
+          sandbox: false,
         },
       })
 
@@ -414,6 +417,7 @@ ipcMain.handle(
               preload: TAB_PRELOAD_PATH,
               contextIsolation: true,
               nodeIntegration: false,
+              sandbox: false,
             },
           })
 

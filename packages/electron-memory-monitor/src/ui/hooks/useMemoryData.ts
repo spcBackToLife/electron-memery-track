@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { MemorySnapshot } from '../../types/snapshot'
 import { eventMarksFromSnapshots } from '../utils/eventMarksFromSnapshots'
 import type { AnomalyEvent } from '../../types/anomaly'
+import type { GCResult, SessionEventMark } from '../../types/report'
 
 declare global {
   interface Window {
@@ -10,7 +11,7 @@ declare global {
       onAnomaly: (callback: (data: AnomalyEvent) => void) => void
       removeSnapshotListener: () => void
       removeAnomalyListener: () => void
-      triggerGC: () => Promise<unknown>
+      triggerGC: () => Promise<GCResult>
       addMark: (label: string, metadata?: Record<string, unknown>) => Promise<void>
       startSession: (label: string, description?: string) => Promise<string>
       stopSession: () => Promise<unknown>
@@ -29,7 +30,20 @@ declare global {
 
 const MAX_SNAPSHOTS = 300 // 保留最近 5 分钟数据（@1s间隔）
 
-export function useMemoryData() {
+/** useMemoryData 返回值的类型定义，供外部组件（如 Dashboard props）引用 */
+export interface MemoryData {
+  snapshots: MemorySnapshot[]
+  latestSnapshot: MemorySnapshot | null
+  anomalies: AnomalyEvent[]
+  isCollecting: boolean
+  triggerGC: () => Promise<GCResult | undefined>
+  addMark: (label: string) => Promise<void | undefined>
+  clearAnomalies: () => void
+  markTimeline: SessionEventMark[]
+  takeHeapSnapshot: (filePath?: string) => Promise<string | undefined>
+}
+
+export function useMemoryData(): MemoryData {
   const [snapshots, setSnapshots] = useState<MemorySnapshot[]>([])
   const [latestSnapshot, setLatestSnapshot] = useState<MemorySnapshot | null>(null)
   const [anomalies, setAnomalies] = useState<AnomalyEvent[]>([])
@@ -70,6 +84,10 @@ export function useMemoryData() {
     setAnomalies([])
   }, [])
 
+  const takeHeapSnapshot = useCallback(async (filePath?: string) => {
+    return window.monitorAPI?.takeHeapSnapshot(filePath)
+  }, [])
+
   const markTimeline = useMemo(() => eventMarksFromSnapshots(snapshots), [snapshots])
 
   return {
@@ -81,5 +99,6 @@ export function useMemoryData() {
     addMark,
     clearAnomalies,
     markTimeline,
+    takeHeapSnapshot,
   }
 }

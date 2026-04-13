@@ -635,7 +635,18 @@ var AnomalyDetector = class extends import_events2.EventEmitter {
               title: "\u603B\u5185\u5B58\u6301\u7EED\u589E\u957F",
               description: `\u5185\u5B58\u4EE5 ${slope.toFixed(2)} KB/s \u7684\u901F\u7387\u6301\u7EED\u589E\u957F (R\xB2=${r2.toFixed(3)})`,
               value: slope,
-              threshold: 10
+              threshold: 10,
+              suggestions: [
+                "\u5BFC\u51FA\u5806\u5FEB\u7167 (Heap Snapshot)\uFF0C\u4F7F\u7528 Chrome DevTools \u7684 Memory \u9762\u677F\u52A0\u8F7D\u5206\u6790",
+                '\u5BF9\u6BD4\u4E24\u4E2A\u65F6\u95F4\u70B9\u7684\u5806\u5FEB\u7167\uFF0C\u67E5\u627E "Allocated between snapshots" \u4E2D\u65B0\u589E\u7684\u5927\u5BF9\u8C61',
+                "\u68C0\u67E5\u4E3B\u8FDB\u7A0B\u4E2D\u662F\u5426\u6709\u672A\u6E05\u7406\u7684 setInterval / setTimeout \u56DE\u8C03",
+                "\u68C0\u67E5 ipcMain.on \u662F\u5426\u5B58\u5728\u91CD\u590D\u6CE8\u518C\uFF08\u6BCF\u6B21\u7A97\u53E3\u521B\u5EFA\u90FD\u6CE8\u518C\u4F46\u4E0D\u79FB\u9664\uFF09",
+                "\u68C0\u67E5\u662F\u5426\u6709\u6301\u7EED\u589E\u957F\u7684 Map / Set / Array \u7F13\u5B58\u672A\u8BBE\u7F6E\u4E0A\u9650\u6216\u8FC7\u671F\u7B56\u7565"
+              ],
+              actions: [
+                { id: "take-heap-snapshot", label: "\u{1F4F8} \u5BFC\u51FA\u5806\u5FEB\u7167", type: "heap-snapshot" },
+                { id: "trigger-gc", label: "\u{1F5D1}\uFE0F \u89E6\u53D1 GC", type: "trigger-gc" }
+              ]
             };
           }
           return null;
@@ -660,7 +671,18 @@ var AnomalyDetector = class extends import_events2.EventEmitter {
               title: "\u5185\u5B58\u7A81\u589E",
               description: `\u603B\u5185\u5B58\u4ECE ${Math.round(avg)} KB \u7A81\u589E\u5230 ${current} KB (+${((current - avg) / avg * 100).toFixed(1)}%)`,
               value: current,
-              threshold: avg * 1.5
+              threshold: avg * 1.5,
+              suggestions: [
+                "\u7ACB\u5373\u5BFC\u51FA\u5806\u5FEB\u7167\uFF0C\u4E0E\u7A81\u589E\u524D\u7684\u5FEB\u7167\u5BF9\u6BD4\uFF0C\u5B9A\u4F4D\u65B0\u589E\u7684\u5927\u5BF9\u8C61",
+                "\u68C0\u67E5\u662F\u5426\u6709\u5927\u91CF\u65B0\u7A97\u53E3/\u6807\u7B7E\u9875\u540C\u65F6\u521B\u5EFA",
+                "\u68C0\u67E5\u662F\u5426\u52A0\u8F7D\u4E86\u5927\u6587\u4EF6\u6216\u5927\u91CF\u56FE\u7247\u8D44\u6E90",
+                "\u68C0\u67E5 IPC \u901A\u4FE1\u662F\u5426\u4F20\u8F93\u4E86\u8D85\u5927\u6570\u636E\uFF08\u5EFA\u8BAE\u5206\u7247\u6216\u4F7F\u7528 MessagePort\uFF09",
+                "\u89E6\u53D1 GC \u540E\u89C2\u5BDF\u5185\u5B58\u662F\u5426\u56DE\u843D\uFF0C\u5982\u4E0D\u56DE\u843D\u5219\u4E3A\u771F\u5B9E\u6CC4\u6F0F"
+              ],
+              actions: [
+                { id: "take-heap-snapshot", label: "\u{1F4F8} \u5BFC\u51FA\u5806\u5FEB\u7167", type: "heap-snapshot" },
+                { id: "trigger-gc", label: "\u{1F5D1}\uFE0F \u89E6\u53D1 GC", type: "trigger-gc" }
+              ]
             };
           }
           return null;
@@ -682,7 +704,17 @@ var AnomalyDetector = class extends import_events2.EventEmitter {
               title: `\u68C0\u6D4B\u5230 ${detached} \u4E2A\u5206\u79BB\u7684 V8 \u4E0A\u4E0B\u6587`,
               description: "\u5B58\u5728\u672A\u6B63\u786E\u9500\u6BC1\u7684 BrowserWindow \u6216 WebContents\uFF0C\u53EF\u80FD\u5BFC\u81F4\u5185\u5B58\u6CC4\u6F0F",
               value: detached,
-              threshold: 0
+              threshold: 0,
+              suggestions: [
+                '\u5728 Chrome DevTools Memory \u9762\u677F\u5BFC\u51FA\u5806\u5FEB\u7167\uFF0C\u641C\u7D22 "Detached" \u67E5\u627E\u6B8B\u7559\u7684 DOM \u6811\u548C JS \u4E0A\u4E0B\u6587',
+                "\u68C0\u67E5\u6240\u6709 BrowserWindow \u662F\u5426\u5728\u5173\u95ED\u65F6\u8C03\u7528\u4E86 destroy()\uFF08\u800C\u975E\u4EC5 close()\uFF09",
+                '\u68C0\u67E5 BrowserWindow.on("closed", ...) \u56DE\u8C03\u4E2D\u662F\u5426\u5C06\u7A97\u53E3\u5F15\u7528\u7F6E\u4E3A null',
+                "\u68C0\u67E5\u662F\u5426\u6709\u95ED\u5305\uFF08\u5982 ipcMain.on \u56DE\u8C03\uFF09\u6301\u6709\u5DF2\u5173\u95ED\u7A97\u53E3\u7684 webContents \u5F15\u7528",
+                "\u68C0\u67E5 ipcMain.on / ipcMain.handle \u662F\u5426\u5728\u7A97\u53E3\u5173\u95ED\u540E\u6B63\u786E\u79FB\u9664\u76D1\u542C"
+              ],
+              actions: [
+                { id: "take-heap-snapshot", label: "\u{1F4F8} \u5BFC\u51FA\u5806\u5FEB\u7167", type: "heap-snapshot" }
+              ]
             };
           }
           return null;
@@ -706,7 +738,18 @@ var AnomalyDetector = class extends import_events2.EventEmitter {
                 title: `V8 \u5806\u4F7F\u7528\u7387 ${(usagePercent * 100).toFixed(1)}%`,
                 description: `\u4E3B\u8FDB\u7A0B V8 \u5806\u4F7F\u7528 ${Math.round(heapUsed / 1024 / 1024)} MB / ${Math.round(heapTotal / 1024 / 1024)} MB`,
                 value: usagePercent * 100,
-                threshold: 85
+                threshold: 85,
+                suggestions: [
+                  "\u5BFC\u51FA\u5806\u5FEB\u7167 (Heap Snapshot)\uFF0C\u4F7F\u7528 Chrome DevTools \u7684 Memory \u9762\u677F\u5206\u6790\u5BF9\u8C61\u7559\u5B58",
+                  '\u5BF9\u6BD4\u4E24\u4E2A\u65F6\u95F4\u70B9\u7684\u5806\u5FEB\u7167\uFF0C\u67E5\u627E "Allocated between snapshots" \u4E2D\u7684\u6CC4\u6F0F\u5BF9\u8C61',
+                  "\u68C0\u67E5 Event Listeners \u662F\u5426\u6B63\u786E\u6E05\u7406\uFF08\u7279\u522B\u662F ipcMain / EventEmitter \u4E0A\u7684\u76D1\u542C\u5668\uFF09",
+                  "\u68C0\u67E5 Promise \u94FE\u662F\u5426\u6709\u672A\u5904\u7406\u7684 rejection \u5BFC\u81F4\u5F15\u7528\u672A\u91CA\u653E",
+                  "\u89E6\u53D1 GC \u540E\u89C2\u5BDF\u4F7F\u7528\u7387\u662F\u5426\u4E0B\u964D\uFF0C\u82E5\u4E0D\u964D\u5219\u786E\u8BA4\u4E3A\u6CC4\u6F0F"
+                ],
+                actions: [
+                  { id: "take-heap-snapshot", label: "\u{1F4F8} \u5BFC\u51FA\u5806\u5FEB\u7167", type: "heap-snapshot" },
+                  { id: "trigger-gc", label: "\u{1F5D1}\uFE0F \u89E6\u53D1 GC", type: "trigger-gc" }
+                ]
               };
             }
           }
@@ -1988,23 +2031,23 @@ var ElectronMemoryMonitor = class extends import_events3.EventEmitter {
   /** 手动触发 GC */
   async triggerGC() {
     const beforeMem = process.memoryUsage();
-    if (global.gc) {
+    let mode = "none";
+    if (typeof global.gc === "function") {
       global.gc();
-    } else {
-      try {
-        v82.writeHeapSnapshot;
-      } catch {
-      }
+      mode = "explicit";
     }
     await new Promise((resolve2) => setTimeout(resolve2, 100));
     const afterMem = process.memoryUsage();
     const freed = beforeMem.heapUsed - afterMem.heapUsed;
+    const hint = mode === "none" ? '\u5F53\u524D\u672A\u542F\u7528 global.gc\u3002\u8BF7\u7528\u542F\u52A8\u53C2\u6570 --js-flags="--expose-gc"\uFF08\u6216 NODE_OPTIONS \u542B --expose-gc\uFF09\u542F\u52A8 Electron\uFF0CGC \u6309\u94AE\u624D\u4F1A\u5F3A\u5236\u56DE\u6536\u4E3B\u8FDB\u7A0B V8 \u5806\uFF1B\u672A\u542F\u7528\u65F6\u603B\u5DE5\u4F5C\u96C6/\u5B50\u8FDB\u7A0B\u66F2\u7EBF\u901A\u5E38\u51E0\u4E4E\u4E0D\u53D8\u3002' : void 0;
     return {
       beforeHeapUsed: beforeMem.heapUsed,
       afterHeapUsed: afterMem.heapUsed,
       freed,
       freedPercent: beforeMem.heapUsed > 0 ? freed / beforeMem.heapUsed * 100 : 0,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      mode,
+      hint
     };
   }
   /** 导出堆快照 */

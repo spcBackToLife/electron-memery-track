@@ -24,7 +24,11 @@ interface ProcessMemoryInfo {
         workingSetSize: number;
         /** 峰值工作集 (KB) */
         peakWorkingSetSize: number;
-        /** 私有字节 (KB) - 不与其他进程共享的内存 */
+        /**
+         * 专用已提交量 (KB)，来自 Chromium getAppMetrics.privateBytes。
+         * Windows 上接近 PrivateUsage（专用提交），不是任务管理器默认「内存」常用的专用工作集；
+         * 已提交但未驻留 RAM 时可能大于 workingSetSize（例如 GPU 进程）。
+         */
         privateBytes?: number;
     };
     /** 仅渲染进程：关联的 webContents ID */
@@ -151,6 +155,19 @@ interface AnomalyEvent {
     value?: number;
     /** 阈值 */
     threshold?: number;
+    /** 排查建议列表 */
+    suggestions?: string[];
+    /** 可执行的快捷操作 */
+    actions?: AnomalyAction[];
+}
+/** 告警可附带的快捷操作 */
+interface AnomalyAction {
+    /** 操作 ID */
+    id: string;
+    /** 按钮文案 */
+    label: string;
+    /** 操作类型 */
+    type: 'heap-snapshot' | 'trigger-gc' | 'open-devtools';
 }
 /** 异常检测规则 */
 interface AnomalyRule {
@@ -429,6 +446,8 @@ interface CompareReport {
     verdict: 'pass' | 'warn' | 'fail';
     verdictReason: string;
 }
+/** 主进程 GC 实际是否调用了 V8 的 global.gc（需 --expose-gc） */
+type GCTriggerMode = 'explicit' | 'none';
 /** GC 结果 */
 interface GCResult {
     beforeHeapUsed: number;
@@ -436,6 +455,10 @@ interface GCResult {
     freed: number;
     freedPercent: number;
     timestamp: number;
+    /** explicit：已调用 global.gc；none：未暴露 gc，仅采样前后堆（曲线可能几乎不变） */
+    mode: GCTriggerMode;
+    /** 供界面展示的简短说明（如如何启用真实 GC） */
+    hint?: string;
 }
 
 /**
@@ -551,4 +574,4 @@ declare const IPC_CHANNELS: {
     readonly RENDERER_REQUEST: "emm:renderer:request";
 };
 
-export { type AnomalyCategory, type AnomalyEvent, type AnomalyRule, type AnomalySeverity, type CompareReport, ElectronMemoryMonitor, type EventMark, type GCResult, IPC_CHANNELS, type Improvement, type MemorySnapshot, type MetricDiff, type MetricSummary, type MonitorConfig, type ProcessMemoryInfo, type Regression, type RendererV8Detail, type SessionEventMark, type SessionIndex, type SessionReport, type SessionsListPayload, type Suggestion, type SystemMemoryInfo, type TestSession, type TrendInfo, type V8HeapDetailStats, type V8HeapSpaceInfo, type V8HeapStats, registerDashboardSchemePrivileged };
+export { type AnomalyCategory, type AnomalyEvent, type AnomalyRule, type AnomalySeverity, type CompareReport, ElectronMemoryMonitor, type EventMark, type GCResult, type GCTriggerMode, IPC_CHANNELS, type Improvement, type MemorySnapshot, type MetricDiff, type MetricSummary, type MonitorConfig, type ProcessMemoryInfo, type Regression, type RendererV8Detail, type SessionEventMark, type SessionIndex, type SessionReport, type SessionsListPayload, type Suggestion, type SystemMemoryInfo, type TestSession, type TrendInfo, type V8HeapDetailStats, type V8HeapSpaceInfo, type V8HeapStats, registerDashboardSchemePrivileged };

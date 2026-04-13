@@ -34,5 +34,6 @@ export type {
   Regression,
   Improvement,
   GCResult,
+  GCTriggerMode,
 } from './types/report'
 export { IPC_CHANNELS } from './ipc/channels'

@@ -24,7 +24,11 @@ export interface ProcessMemoryInfo {
     workingSetSize: number
     /** 峰值工作集 (KB) */
     peakWorkingSetSize: number
-    /** 私有字节 (KB) - 不与其他进程共享的内存 */
+    /**
+     * 专用已提交量 (KB)，来自 Chromium getAppMetrics.privateBytes。
+     * Windows 上接近 PrivateUsage（专用提交），不是任务管理器默认「内存」常用的专用工作集；
+     * 已提交但未驻留 RAM 时可能大于 workingSetSize（例如 GPU 进程）。
+     */
     privateBytes?: number
   }
 

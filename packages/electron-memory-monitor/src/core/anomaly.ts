@@ -107,6 +107,17 @@ export class AnomalyDetector extends EventEmitter {
               description: `内存以 ${slope.toFixed(2)} KB/s 的速率持续增长 (R²=${r2.toFixed(3)})`,
               value: slope,
               threshold: 10,
+              suggestions: [
+                '导出堆快照 (Heap Snapshot)，使用 Chrome DevTools 的 Memory 面板加载分析',
+                '对比两个时间点的堆快照，查找 "Allocated between snapshots" 中新增的大对象',
+                '检查主进程中是否有未清理的 setInterval / setTimeout 回调',
+                '检查 ipcMain.on 是否存在重复注册（每次窗口创建都注册但不移除）',
+                '检查是否有持续增长的 Map / Set / Array 缓存未设置上限或过期策略',
+              ],
+              actions: [
+                { id: 'take-heap-snapshot', label: '📸 导出堆快照', type: 'heap-snapshot' },
+                { id: 'trigger-gc', label: '🗑️ 触发 GC', type: 'trigger-gc' },
+              ],
             }
           }
           return null
@@ -136,6 +147,17 @@ export class AnomalyDetector extends EventEmitter {
               description: `总内存从 ${Math.round(avg)} KB 突增到 ${current} KB (+${(((current - avg) / avg) * 100).toFixed(1)}%)`,
               value: current,
               threshold: avg * 1.5,
+              suggestions: [
+                '立即导出堆快照，与突增前的快照对比，定位新增的大对象',
+                '检查是否有大量新窗口/标签页同时创建',
+                '检查是否加载了大文件或大量图片资源',
+                '检查 IPC 通信是否传输了超大数据（建议分片或使用 MessagePort）',
+                '触发 GC 后观察内存是否回落，如不回落则为真实泄漏',
+              ],
+              actions: [
+                { id: 'take-heap-snapshot', label: '📸 导出堆快照', type: 'heap-snapshot' },
+                { id: 'trigger-gc', label: '🗑️ 触发 GC', type: 'trigger-gc' },
+              ],
             }
           }
           return null
@@ -159,6 +181,16 @@ export class AnomalyDetector extends EventEmitter {
               description: '存在未正确销毁的 BrowserWindow 或 WebContents，可能导致内存泄漏',
               value: detached,
               threshold: 0,
+              suggestions: [
+                '在 Chrome DevTools Memory 面板导出堆快照，搜索 "Detached" 查找残留的 DOM 树和 JS 上下文',
+                '检查所有 BrowserWindow 是否在关闭时调用了 destroy()（而非仅 close()）',
+                '检查 BrowserWindow.on("closed", ...) 回调中是否将窗口引用置为 null',
+                '检查是否有闭包（如 ipcMain.on 回调）持有已关闭窗口的 webContents 引用',
+                '检查 ipcMain.on / ipcMain.handle 是否在窗口关闭后正确移除监听',
+              ],
+              actions: [
+                { id: 'take-heap-snapshot', label: '📸 导出堆快照', type: 'heap-snapshot' },
+              ],
             }
           }
           return null
@@ -184,6 +216,17 @@ export class AnomalyDetector extends EventEmitter {
                 description: `主进程 V8 堆使用 ${Math.round(heapUsed / 1024 / 1024)} MB / ${Math.round(heapTotal / 1024 / 1024)} MB`,
                 value: usagePercent * 100,
                 threshold: 85,
+                suggestions: [
+                  '导出堆快照 (Heap Snapshot)，使用 Chrome DevTools 的 Memory 面板分析对象留存',
+                  '对比两个时间点的堆快照，查找 "Allocated between snapshots" 中的泄漏对象',
+                  '检查 Event Listeners 是否正确清理（特别是 ipcMain / EventEmitter 上的监听器）',
+                  '检查 Promise 链是否有未处理的 rejection 导致引用未释放',
+                  '触发 GC 后观察使用率是否下降，若不降则确认为泄漏',
+                ],
+                actions: [
+                  { id: 'take-heap-snapshot', label: '📸 导出堆快照', type: 'heap-snapshot' },
+                  { id: 'trigger-gc', label: '🗑️ 触发 GC', type: 'trigger-gc' },
+                ],
               }
             }
           }

@@ -2,13 +2,19 @@ import React, { useState } from 'react'
 import Dashboard from './pages/Dashboard'
 import Report from './pages/Report'
 import Compare from './pages/Compare'
+import { useMemoryData } from './hooks/useMemoryData'
+import { ToastProvider } from './context/ToastContext'
 
 type Page = 'dashboard' | 'report' | 'compare'
 
 const MonitorApp: React.FC = () => {
   const [currentPage, setCurrentPage] = useState<Page>('dashboard')
 
+  // 将实时数据采集提升到 App 级别，避免 Tab 切换导致 Dashboard 卸载时丢失已积累的快照数据
+  const memoryData = useMemoryData()
+
   return (
+    <ToastProvider>
     <div className="monitor-app">
       <nav className="monitor-nav">
         <div className="monitor-nav-brand">
@@ -42,12 +48,14 @@ const MonitorApp: React.FC = () => {
           仅挂载当前页：若三页同时 display:none 切换，Report/Compare 内 fixed、100vh、图表层
           在部分 Electron/Chromium 下仍可能挡住命中测试，导致实时监控里「结束会话」点不动。
           切换 Tab 会卸载非当前页（报告列表滚动位置会重置；进入页时会 refreshSessions）。
+          实时内存数据已提升到 MonitorApp 级别，Dashboard 卸载后再切回不会丢失已采集的快照。
         */}
-        {currentPage === 'dashboard' && <Dashboard paneVisible />}
+        {currentPage === 'dashboard' && <Dashboard paneVisible memoryData={memoryData} />}
         {currentPage === 'report' && <Report paneVisible />}
         {currentPage === 'compare' && <Compare paneVisible />}
       </main>
     </div>
+    </ToastProvider>
   )
 }
 

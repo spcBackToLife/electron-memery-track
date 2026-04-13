@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react'
+import React, { useEffect, useCallback, useState } from 'react'
 import MetricCard from '../components/MetricCard'
 import ProcessTable from '../components/ProcessTable'
 import MemoryChart from '../components/MemoryChart'
@@ -8,8 +8,11 @@ import AlertPanel from '../components/AlertPanel'
 import SessionControl from '../components/SessionControl'
 import V8HeapDetail from '../components/V8HeapDetail'
 import RendererV8Table from '../components/RendererV8Table'
-import { useMemoryData } from '../hooks/useMemoryData'
 import { useSession } from '../hooks/useSession'
+import type { MemoryData } from '../hooks/useMemoryData'
+import type { AnomalyAction } from '../../types/anomaly'
+import type { GCResult } from '../../types/report'
+import { useToast } from '../context/ToastContext'
 
 const formatKB = (kb: number | undefined | null): string => {
   if (kb == null || isNaN(kb)) return '0 KB'
@@ -27,11 +30,15 @@ const formatBytes = (bytes: number | undefined | null): string => {
   return `${bytes} B`
 }
 
+const heapUsedToMb = (bytes: number) => (bytes / 1024 / 1024).toFixed(2)
+
 interface DashboardProps {
   paneVisible?: boolean
+  /** 由 MonitorApp 提升到顶层的实时内存数据，避免 Tab 切换丢失 */
+  memoryData: MemoryData
 }
 
-const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
+const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true, memoryData }) => {
   const {
     snapshots,
     latestSnapshot,
@@ -40,7 +47,8 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
     addMark,
     clearAnomalies,
     markTimeline,
-  } = useMemoryData()
+    takeHeapSnapshot,
+  } = memoryData
 
   const {
     currentSessionId,
@@ -49,6 +57,73 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
     stopSession,
     refreshSessions,
   } = useSession()
+
+  const { showToast } = useToast()
+  const [gcPending, setGcPending] = useState(false)
+
+  const handleTriggerGC = useCallback(async () => {
+    setGcPending(true)
+    try {
+      const r: GCResult | undefined = await triggerGC()
+      if (r == null) {
+        showToast('GC 失败：未连接到监控（monitorAPI 不可用）', 'error')
+        return
+      }
+      const mode = r.mode ?? 'none'
+      const before = heapUsedToMb(r.beforeHeapUsed)
+      const after = heapUsedToMb(r.afterHeapUsed)
+      const freedMb = r.freed / 1024 / 1024
+
+      if (mode === 'none') {
+        showToast(
+          `GC：未执行强制回收（未暴露 global.gc）。主进程堆采样约 ${before} → ${after} MB。图表多为子进程内存，可能几乎不变。请用启动参数 --js-flags="--expose-gc" 后再试。`,
+          'info',
+        )
+      } else {
+        const delta =
+          freedMb >= 0
+            ? `估算释放 ${freedMb.toFixed(2)} MB（约 ${r.freedPercent.toFixed(1)}%）`
+            : `堆增加 ${Math.abs(freedMb).toFixed(2)} MB（GC 后仍可能有新分配）`
+        showToast(
+          `GC 已完成（主进程 V8）：${before} → ${after} MB，${delta}`,
+          freedMb > 0.05 ? 'success' : 'info',
+        )
+      }
+    } catch (e) {
+      showToast(`GC 失败：${e instanceof Error ? e.message : String(e)}`, 'error')
+    } finally {
+      setGcPending(false)
+    }
+  }, [triggerGC, showToast])
+
+  const handleTakeHeapSnapshot = useCallback(async () => {
+    try {
+      const filePath = await takeHeapSnapshot()
+      if (filePath) {
+        console.log('[EMM] Heap snapshot saved:', filePath)
+      }
+    } catch (err) {
+      console.error('[EMM] Failed to take heap snapshot:', err)
+    }
+  }, [takeHeapSnapshot])
+
+  const handleAnomalyAction = useCallback(
+    (action: AnomalyAction) => {
+      switch (action.type) {
+        case 'heap-snapshot':
+          handleTakeHeapSnapshot()
+          break
+        case 'trigger-gc':
+          void handleTriggerGC()
+          break
+        case 'open-devtools':
+          // 暂不实现，DevTools 需要另外的 IPC
+          console.log('[EMM] open-devtools action not implemented yet')
+          break
+      }
+    },
+    [handleTakeHeapSnapshot, handleTriggerGC],
+  )
 
   useEffect(() => {
     if (paneVisible) void refreshSessions()
@@ -75,8 +150,12 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
         currentSessionId={currentSessionId}
         onStart={startSession}
         onStop={stopSession}
-        onTriggerGC={triggerGC}
+        onTriggerGC={() => {
+          void handleTriggerGC()
+        }}
+        gcPending={gcPending}
         onAddMark={addMark}
+        onTakeHeapSnapshot={handleTakeHeapSnapshot}
         markCount={markTimeline.length}
       />
 
@@ -169,7 +248,7 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true }) => {
       {/* 告警面板 */}
       <div className="section">
         <h3>🚨 异常告警</h3>
-        <AlertPanel anomalies={anomalies} onClear={clearAnomalies} />
+        <AlertPanel anomalies={anomalies} onClear={clearAnomalies} onAction={handleAnomalyAction} />
       </div>
     </div>
   )

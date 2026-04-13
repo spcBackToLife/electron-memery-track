@@ -6,7 +6,10 @@ interface SessionControlProps {
   onStart: (label: string, description?: string) => void
   onStop: () => Promise<unknown> | void
   onTriggerGC: () => void
+  /** GC 请求进行中（禁用按钮，避免连点） */
+  gcPending?: boolean
   onAddMark: (label: string) => void
+  onTakeHeapSnapshot?: () => void
   /** 当前趋势缓冲区内已出现的标记条数（仅展示） */
   markCount?: number
 }
@@ -17,7 +20,9 @@ const SessionControl: React.FC<SessionControlProps> = ({
   onStart,
   onStop,
   onTriggerGC,
+  gcPending = false,
   onAddMark,
+  onTakeHeapSnapshot,
   markCount = 0,
 }) => {
   const [label, setLabel] = useState('')
@@ -75,9 +80,20 @@ const SessionControl: React.FC<SessionControlProps> = ({
         )}
 
         <div className="session-tools">
-          <button type="button" className="btn btn-secondary" onClick={onTriggerGC} title="手动触发垃圾回收">
-            🗑️ GC
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onTriggerGC}
+            disabled={gcPending}
+            title="仅主进程 V8；需 --expose-gc 才真正强制 GC，详见点击后提示"
+          >
+            {gcPending ? '⏳ GC…' : '🗑️ GC'}
           </button>
+          {onTakeHeapSnapshot && (
+            <button type="button" className="btn btn-secondary" onClick={onTakeHeapSnapshot} title="导出主进程 V8 堆快照">
+              📸 堆快照
+            </button>
+          )}
 
           <div className="mark-form">
             <input

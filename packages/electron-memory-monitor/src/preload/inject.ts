@@ -18,6 +18,15 @@ import { IPC_CHANNELS } from '../ipc/channels'
  * ```
  */
 export function injectRendererReporter(interval = 2000): () => void {
+  if (typeof process === 'undefined' || typeof process.memoryUsage !== 'function') {
+    console.warn(
+      '[@electron-memory/monitor] injectRendererReporter 需要 Node 的 process.memoryUsage。' +
+        'Electron 在 webPreferences.sandbox=true（或默认沙箱）的 preload 里不提供 process，上报不会生效。' +
+        '请将业务 WebContents 设为 sandbox: false，或为该窗口关闭沙箱。'
+    )
+    return () => {}
+  }
+
   let timer: ReturnType<typeof setInterval> | null = null
 
   const report = () => {
@@ -31,8 +40,8 @@ export function injectRendererReporter(interval = 2000): () => void {
         external: mem.external,
         arrayBuffers: mem.arrayBuffers,
       })
-    } catch {
-      // 忽略错误
+    } catch (err) {
+      console.warn('[@electron-memory/monitor] injectRendererReporter 上报失败:', err)
     }
   }
 
