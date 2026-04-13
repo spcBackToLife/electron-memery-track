@@ -20,6 +20,7 @@ import type {
   RendererV8Detail,
 } from '../types/snapshot'
 import type { MonitorConfig } from '../types/config'
+import { createPrivateWsProvider, getNativeModuleStatus, type PrivateWorkingSetProvider } from './native-memory'
 
 export class MemoryCollector extends EventEmitter {
   private config: MonitorConfig
@@ -29,10 +30,27 @@ export class MemoryCollector extends EventEmitter {
   private pendingMarks: EventMark[] = []
   private rendererDetails: Map<number, RendererV8Detail> = new Map()
   private monitorWindowId: number | null = null
+  /**
+   * 专用工作集查询 Provider（自动选择 Native C++ 或 PowerShell fallback）
+   */
+  private privateWsProvider: PrivateWorkingSetProvider
+  /**
+   * 最近一次通过系统 API 查询到的各 PID 专用工作集缓存 (PID → KB)。
+   * 由于系统查询有一定延迟，采用异步刷新 + 缓存策略，不阻塞主采集循环。
+   */
+  private privateWsCache: Map<number, number> = new Map()
+  /** 上次刷新 privateWsCache 的时间戳 */
+  private privateWsLastRefresh = 0
+  /** privateWsCache 刷新间隔 (ms)，与采集间隔对齐但不能太频繁 */
+  private privateWsRefreshInterval = 2000
 
   constructor(config: MonitorConfig) {
     super()
     this.config = config
+    this.privateWsProvider = createPrivateWsProvider()
+
+    const status = getNativeModuleStatus()
+    console.log(`[MemoryCollector] Private WS backend: ${status.backend}${status.error ? ` (${status.error})` : ''}`)
   }
 
   /** 设置监控面板的 webContents ID，用于标记 */
@@ -62,6 +80,11 @@ export class MemoryCollector extends EventEmitter {
   /** 开始采集 */
   start(): void {
     if (this.timer) return
+
+    // privateWs 的刷新间隔：Native 模块速度快可以频繁刷新，PowerShell fallback 不能太频繁
+    this.privateWsRefreshInterval = this.privateWsProvider.backend === 'native'
+      ? Math.max(500, this.config.collectInterval)
+      : Math.max(2000, this.config.collectInterval * 2)
 
     // 立即采集一次
     this.collect()
@@ -155,7 +178,9 @@ export class MemoryCollector extends EventEmitter {
       }
     }
 
-    return metrics.map((metric) => {
+    const allPids = metrics.map((m) => m.pid)
+
+    const result = metrics.map((metric) => {
       const wc = pidToWc.get(metric.pid)
       let windowTitle: string | undefined
       let webContentsId: number | undefined
@@ -190,13 +215,38 @@ export class MemoryCollector extends EventEmitter {
         memory: {
           workingSetSize: metric.memory.workingSetSize,
           peakWorkingSetSize: metric.memory.peakWorkingSetSize,
-          privateBytes: (metric.memory as Record<string, number>).privateBytes,
+          privateBytes: (metric.memory as unknown as Record<string, number>).privateBytes,
+          privateWorkingSet: this.privateWsCache.get(metric.pid),
         },
         webContentsId,
         windowTitle,
       }
 
       return info
+    })
+
+    // 触发异步刷新专用工作集缓存（不阻塞当前采集）
+    this.maybeRefreshPrivateWs(allPids)
+
+    return result
+  }
+
+  /**
+   * 异步刷新专用工作集缓存。
+   * 按 privateWsRefreshInterval 节流，刷新完成后下一次 collect 自动使用新数据。
+   * 底层自动选择 Native C++ 或 PowerShell fallback。
+   */
+  private maybeRefreshPrivateWs(pids: number[]): void {
+    const now = Date.now()
+    if (!this.privateWsProvider.available || now - this.privateWsLastRefresh < this.privateWsRefreshInterval) return
+    this.privateWsLastRefresh = now
+
+    this.privateWsProvider.queryPrivateWorkingSet(pids).then((map) => {
+      if (map.size > 0) {
+        this.privateWsCache = map
+      }
+    }).catch(() => {
+      // 忽略查询失败
     })
   }
 

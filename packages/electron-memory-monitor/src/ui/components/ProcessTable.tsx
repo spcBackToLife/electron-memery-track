@@ -40,13 +40,25 @@ const formatPrivate = (kb: number | undefined): string => {
 const ProcessTable: React.FC<ProcessTableProps> = ({ processes }) => {
   const sorted = [...processes].sort((a, b) => b.memory.workingSetSize - a.memory.workingSetSize)
 
+  // 检测是否有任何进程附带了 privateWorkingSet 数据（Windows 才有）
+  const hasPrivateWs = sorted.some((p) => p.memory.privateWorkingSet != null)
+
   return (
     <div className="process-table-container">
       <p className="process-table-hint">
-        <strong>无法与任务管理器默认列逐项完全一致：</strong>系统界面用的是微软自己的汇总/列定义（常见为<strong>专用工作集</strong>），而 Electron{' '}
-        <code>getAppMetrics()</code> 只提供 Chromium 封装的两类数——<strong>工作集</strong>（驻留物理内存）与{' '}
-        <strong>专用提交</strong>（<code>privateBytes</code>，接近 Windows 的专用已提交量 PrivateUsage）。二者与「专用工作集」不是同一个 Win32 计数器。
-        已提交但未全在内存里时，<strong>专用提交可以大于工作集</strong>（截图里 GPU 即如此）。请按 <strong>PID</strong> 对照，并在任务管理器中通过「选择列」勾选<strong>工作集、专用工作集、提交大小</strong>逐列比对。
+        {hasPrivateWs ? (
+          <>
+            <strong>专用工作集</strong>（绿色列）对应 Windows 任务管理器默认的「内存」列（WorkingSetPrivate），可直接按 PID 与任务管理器对照。
+            <strong>工作集</strong>含共享 DLL 页面，通常 ≥ 专用工作集；<strong>专用提交</strong>是已提交的私有虚拟内存（含页面文件），可能 &gt; 工作集。
+          </>
+        ) : (
+          <>
+            <strong>无法与任务管理器默认列逐项完全一致：</strong>系统界面用的是微软自己的汇总/列定义（常见为<strong>专用工作集</strong>），而 Electron{' '}
+            <code>getAppMetrics()</code> 只提供 Chromium 封装的两类数——<strong>工作集</strong>（驻留物理内存）与{' '}
+            <strong>专用提交</strong>（<code>privateBytes</code>，接近 Windows 的专用已提交量 PrivateUsage）。二者与「专用工作集」不是同一个 Win32 计数器。
+            已提交但未全在内存里时，<strong>专用提交可以大于工作集</strong>（截图里 GPU 即如此）。请按 <strong>PID</strong> 对照，并在任务管理器中通过「选择列」勾选<strong>工作集、专用工作集、提交大小</strong>逐列比对。
+          </>
+        )}
       </p>
       <table className="process-table">
         <thead>
@@ -54,7 +66,12 @@ const ProcessTable: React.FC<ProcessTableProps> = ({ processes }) => {
             <th>PID</th>
             <th>类型</th>
             <th>名称</th>
-            <th title="含共享映射，通常 ≥ 专用内存">工作集</th>
+            {hasPrivateWs && (
+              <th title="专用工作集 = 进程独占的已驻留物理 RAM（即任务管理器默认「内存」列）" className="memory-private-ws-header">
+                专用工作集
+              </th>
+            )}
+            <th title="含共享映射，通常 ≥ 专用工作集">工作集</th>
             <th>峰值</th>
             <th title="privateBytes ≈ 专用已提交（非 TM 默认的专用工作集）；可能大于工作集">专用提交</th>
             <th>CPU</th>
@@ -76,6 +93,9 @@ const ProcessTable: React.FC<ProcessTableProps> = ({ processes }) => {
                 {proc.isMonitorProcess ? '🔍 ' : ''}
                 {proc.name || proc.windowTitle || '-'}
               </td>
+              {hasPrivateWs && (
+                <td className="memory-value memory-private-ws">{formatPrivate(proc.memory.privateWorkingSet)}</td>
+              )}
               <td className="memory-value">{formatKB(proc.memory.workingSetSize)}</td>
               <td className="memory-value">{formatKB(proc.memory.peakWorkingSetSize)}</td>
               <td className="memory-value memory-private">{formatPrivate(proc.memory.privateBytes)}</td>
