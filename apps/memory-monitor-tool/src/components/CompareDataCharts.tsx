@@ -8,10 +8,18 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
+  ReferenceLine,
 } from 'recharts'
 import type { CompareTrendPoint } from '../utils/comparePidMetrics'
 
 export type { CompareTrendPoint }
+
+/** 对比图横轴为采样序号时，在对应序号处画竖线（基线蓝 / 目标橙） */
+export interface CompareChartMarkRef {
+  index: number
+  label: string
+  side: 'base' | 'target'
+}
 
 interface CompareDataChartsProps {
   points: CompareTrendPoint[]
@@ -19,6 +27,8 @@ interface CompareDataChartsProps {
   targetLabel: string
   /** 图表主标题，默认「内存曲线对比」 */
   title?: string
+  /** 各会话标记落在对齐后的采样序号上（与下方标记表一致） */
+  markRefs?: CompareChartMarkRef[]
 }
 
 /**
@@ -29,6 +39,7 @@ const CompareDataCharts: React.FC<CompareDataChartsProps> = ({
   baseLabel,
   targetLabel,
   title = '📈 内存曲线对比',
+  markRefs,
 }) => {
   const data = useMemo(() => points, [points])
 
@@ -40,6 +51,9 @@ const CompareDataCharts: React.FC<CompareDataChartsProps> = ({
       <p className="chart-caption">
         横轴为对齐后的采样序号（两会话各取前 N 个采样点对齐，N = min(基线, 目标)）。按 PID
         对比时，缺采样点的进程记为 0 MB。
+        {markRefs != null && markRefs.length > 0
+          ? ' 蓝色 / 橙色竖线分别表示基线、目标会话中该序号附近出现的阶段标记（按采样序对齐，非绝对时间对齐）。'
+          : ''}
       </p>
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={data} margin={{ top: 8, right: 28, left: 8, bottom: 8 }}>
@@ -59,6 +73,21 @@ const CompareDataCharts: React.FC<CompareDataChartsProps> = ({
           <Legend />
           <Line type="monotone" dataKey="baseMB" name={baseLabel} stroke="#1890ff" dot={false} strokeWidth={2} />
           <Line type="monotone" dataKey="targetMB" name={targetLabel} stroke="#fa8c16" dot={false} strokeWidth={2} />
+          {markRefs?.map((m, i) => (
+            <ReferenceLine
+              key={`${m.side}-${m.index}-${m.label}-${i}`}
+              x={m.index}
+              stroke={m.side === 'base' ? 'rgba(24, 144, 255, 0.9)' : 'rgba(250, 140, 22, 0.95)'}
+              strokeDasharray="4 3"
+              strokeWidth={1.25}
+              label={{
+                value: `${m.side === 'base' ? '基线' : '目标'} · ${m.label}`,
+                position: 'insideTop',
+                fill: m.side === 'base' ? '#69b1ff' : '#ffc069',
+                fontSize: 9,
+              }}
+            />
+          ))}
         </LineChart>
       </ResponsiveContainer>
     </div>

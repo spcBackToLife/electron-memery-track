@@ -666,6 +666,44 @@ body {
   .trend-val.no { color: @success; }
 }
 
+// 报告：阶段标记表（与 SDK 报告页一致）
+.report-event-marks {
+  margin-top: 20px;
+}
+
+.report-marks-table-wrap {
+  overflow-x: auto;
+  margin-top: 8px;
+}
+
+.report-mark-label-cell {
+  max-width: 240px;
+  word-break: break-word;
+}
+
+// 对比页：两会话标记并排
+.compare-event-marks {
+  margin-top: 18px;
+  margin-bottom: 8px;
+}
+
+.compare-marks-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 10px;
+
+  @media (max-width: 900px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.compare-marks-subtitle {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: @text-secondary;
+}
+
 // Data Preview Table
 .report-data-preview { margin-top: 20px; }
 .data-table {

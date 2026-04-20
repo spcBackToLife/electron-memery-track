@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import type { TestSession, CompareResult, MemorySnapshot } from '../types'
 import { useToast } from '../context/ToastContext'
-import CompareDataCharts from '../components/CompareDataCharts'
-import { formatSessionSelectLabel } from '../utils/format'
+import CompareDataCharts, { type CompareChartMarkRef } from '../components/CompareDataCharts'
+import { formatSessionSelectLabel, formatTime } from '../utils/format'
+import { collectReportEventMarksFromSnapshots, snapshotIndexForMark } from '../utils/reportEventMarks'
 import type { ComparePidSelection, PidCompareRow } from '../utils/comparePidMetrics'
 import {
   buildCompareTrendPoints,
@@ -51,6 +52,39 @@ const ComparePage: React.FC = () => {
     return getSelectionMetricsRow(snapPair.base, snapPair.target, selectedCompare)
   }, [snapPair, selectedCompare])
 
+  const baseSessionMarks = useMemo(() => {
+    if (!snapPair) return []
+    return collectReportEventMarksFromSnapshots(snapPair.base)
+  }, [snapPair])
+
+  const targetSessionMarks = useMemo(() => {
+    if (!snapPair) return []
+    return collectReportEventMarksFromSnapshots(snapPair.target)
+  }, [snapPair])
+
+  const compareChartMarkRefs = useMemo((): CompareChartMarkRef[] => {
+    if (!snapPair) return []
+    const n = Math.min(snapPair.base.length, snapPair.target.length)
+    if (n === 0) return []
+    const cap = (i: number) => Math.max(0, Math.min(i, n - 1))
+    const refs: CompareChartMarkRef[] = []
+    for (const m of baseSessionMarks) {
+      refs.push({
+        side: 'base',
+        index: cap(snapshotIndexForMark(snapPair.base, m)),
+        label: m.label,
+      })
+    }
+    for (const m of targetSessionMarks) {
+      refs.push({
+        side: 'target',
+        index: cap(snapshotIndexForMark(snapPair.target, m)),
+        label: m.label,
+      })
+    }
+    return refs
+  }, [snapPair, baseSessionMarks, targetSessionMarks])
+
   const sessionOptionLabel = (s: TestSession) =>
     `${s.label}（${formatSessionSelectLabel(s.startTime)}）`
 
@@ -66,8 +100,8 @@ const ComparePage: React.FC = () => {
     setSelectedCompare('aggregate')
     try {
       const result = (await window.monitorAPI.compareSessions(baseId, targetId)) as CompareResult | null
-      const baseSn = (await window.monitorAPI.getSessionSnapshots(baseId, 800)) as MemorySnapshot[]
-      const targetSn = (await window.monitorAPI.getSessionSnapshots(targetId, 800)) as MemorySnapshot[]
+      const baseSn = (await window.monitorAPI.getSessionSnapshots(baseId, 2000)) as MemorySnapshot[]
+      const targetSn = (await window.monitorAPI.getSessionSnapshots(targetId, 2000)) as MemorySnapshot[]
 
       setCompareResult(result)
       setSnapPair({ base: baseSn, target: targetSn })
@@ -174,12 +208,83 @@ const ComparePage: React.FC = () => {
             </p>
           </div>
 
+          {snapPair && (baseSessionMarks.length > 0 || targetSessionMarks.length > 0) && (
+            <div className="compare-event-marks">
+              <h3>📍 阶段标记对照</h3>
+              <p className="chart-caption">
+                以下为各会话内「📌 标记」在<strong>下一拍采样</strong>上的时间与当时总内存。对比图横轴是<strong>采样序号对齐</strong>（第
+                N 次对第 N 次），竖线表示该标记落在本会话的第几个采样点附近，与另一会话的绝对时间不一定一致。
+              </p>
+              <div className="compare-marks-two-col">
+                <div>
+                  <h4 className="compare-marks-subtitle">基线</h4>
+                  {baseSessionMarks.length === 0 ? (
+                    <p className="chart-caption">无标记</p>
+                  ) : (
+                    <table className="data-table report-marks-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>采样#</th>
+                          <th>时间</th>
+                          <th>标签</th>
+                          <th>总(MB)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {baseSessionMarks.map((m, i) => (
+                          <tr key={`b-${m.timestamp}-${m.label}-${i}`}>
+                            <td>{i + 1}</td>
+                            <td>{snapshotIndexForMark(snapPair.base, m)}</td>
+                            <td>{formatTime(m.timestamp)}</td>
+                            <td className="report-mark-label-cell">{m.label}</td>
+                            <td>{(m.totalWorkingSetKB / 1024).toFixed(1)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+                <div>
+                  <h4 className="compare-marks-subtitle">目标</h4>
+                  {targetSessionMarks.length === 0 ? (
+                    <p className="chart-caption">无标记</p>
+                  ) : (
+                    <table className="data-table report-marks-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>采样#</th>
+                          <th>时间</th>
+                          <th>标签</th>
+                          <th>总(MB)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {targetSessionMarks.map((m, i) => (
+                          <tr key={`t-${m.timestamp}-${m.label}-${i}`}>
+                            <td>{i + 1}</td>
+                            <td>{snapshotIndexForMark(snapPair.target, m)}</td>
+                            <td>{formatTime(m.timestamp)}</td>
+                            <td className="report-mark-label-cell">{m.label}</td>
+                            <td>{(m.totalWorkingSetKB / 1024).toFixed(1)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {compareTrend.length >= 2 && (
             <CompareDataCharts
               points={compareTrend}
               title={chartTitle}
               baseLabel={`基线: ${sessions.find((x) => x.id === baseId)?.label ?? baseId}`}
               targetLabel={`目标: ${sessions.find((x) => x.id === targetId)?.label ?? targetId}`}
+              markRefs={compareChartMarkRefs.length > 0 ? compareChartMarkRefs : undefined}
             />
           )}
 

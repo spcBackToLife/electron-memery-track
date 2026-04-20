@@ -432,15 +432,22 @@
     "msbuild_path": "C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\MSBuild\\Current\\Bin\\MSBuild.exe",
     "target": "33.2.1",
     "cache": "C:\\Users\\piconpi\\AppData\\Local\\npm-cache",
-    "globalconfig": "C:\\nvm4w\\nodejs\\etc\\npmrc",
+    "frozen_lockfile": "",
+    "globalconfig": "C:\\Users\\piconpi\\AppData\\Local\\pnpm\\config\\rc",
     "global_prefix": "C:\\nvm4w\\nodejs",
     "init_module": "C:\\Users\\piconpi\\.npm-init.js",
     "local_prefix": "C:\\my-work\\electron-memery-demo\\apps\\memory-monitor-tool\\native",
     "node_gyp": "C:\\Users\\piconpi\\AppData\\Local\\nvm\\v20.20.0\\node_modules\\npm\\node_modules\\node-gyp\\bin\\node-gyp.js",
+    "npm_globalconfig": "C:\\nvm4w\\nodejs\\etc\\npmrc",
     "npm_version": "10.8.2",
+    "onlyBuiltDependencies_": "true",
     "prefix": "C:\\nvm4w\\nodejs",
     "registry": "https://mirrors.tencent.com/npm/",
     "userconfig": "C:\\Users\\piconpi\\.npmrc",
-    "user_agent": "npm/10.8.2 node/v20.20.0 win32 x64 workspaces/false"
+    "user_agent": "pnpm/10.30.2 npm/? node/v20.20.0 win32 x64",
+    "verify_deps_before_run": "false",
+    "_jsr_registry": "https://npm.jsr.io/",
+    "__electron": "true",
+    "__esbuild": "true"
   }
 }

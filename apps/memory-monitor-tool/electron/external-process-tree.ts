@@ -1,8 +1,10 @@
 /**
- * Windows：根据根 PID 枚举进程子树（含根），并附带进程名。
- * 用于「启动并监控」后采集目标 exe 全进程树内存。
+ * Windows：根据根 PID 枚举进程子树（含根），并附带进程名 / 镜像路径 / 命令行。
+ * 优先 memory_native（系统 API）；失败或未编译导出时回退 PowerShell + WMI。
  */
 import { execFile } from 'child_process'
+
+import { enumerateProcessTreeNativeSync, isNativeMemoryLoaded } from './native-memory'
 
 export interface ProcessTreeResult {
   pids: number[]
@@ -18,10 +20,33 @@ export function fetchWindowsProcessTree(rootPid: number): Promise<ProcessTreeRes
     return Promise.resolve({ pids: [], names: new Map(), exePath: new Map(), commandLine: new Map() })
   }
 
+  const root = Math.floor(rootPid)
+
+  if (isNativeMemoryLoaded()) {
+    try {
+      const rows = enumerateProcessTreeNativeSync(root)
+      if (rows != null && rows.length > 0) {
+        const pids: number[] = []
+        const names = new Map<number, string>()
+        const exePath = new Map<number, string>()
+        const commandLine = new Map<number, string>()
+        for (const r of rows) {
+          pids.push(r.pid)
+          names.set(r.pid, r.name.trim() ? r.name : `PID ${r.pid}`)
+          if (r.exePath.trim()) exePath.set(r.pid, r.exePath.trim())
+          if (r.commandLine.trim()) commandLine.set(r.pid, r.commandLine.trim())
+        }
+        return Promise.resolve({ pids, names, exePath, commandLine })
+      }
+    } catch (e) {
+      console.warn('[external-process-tree] native enumerate failed, falling back to PowerShell', e)
+    }
+  }
+
   const script = `
 $OutputEncoding = [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $ErrorActionPreference = 'SilentlyContinue'
-$root = ${Math.floor(rootPid)}
+$root = ${root}
 $list = Get-CimInstance Win32_Process | Select-Object ProcessId, ParentProcessId, Name, ExecutablePath, CommandLine
 $children = @{}
 $pidToDetail = @{}

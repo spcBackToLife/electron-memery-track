@@ -6,6 +6,7 @@
 //   - getPrivateWorkingSet(pid)
 //   - batchGetPrivateWorkingSet(pids[])
 //   - batchGetProcessMemory(pids[])
+//   - enumerateProcessTree(rootPid) — Toolhelp32 + QueryFullProcessImageName + NtQueryInformationProcess
 //
 // Built with N-API (node-addon-api) for ABI stability.
 
@@ -14,7 +15,19 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
+#include <tlhelp32.h>
+#include <winternl.h>
+#include <cwchar>
+#include <queue>
+#include <set>
+#include <string>
+#include <unordered_map>
+#include <vector>
 #pragma comment(lib, "psapi.lib")
+
+#ifndef NT_SUCCESS
+#define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
+#endif
 #endif
 
 #ifdef _WIN32
@@ -91,6 +104,65 @@ static bool GetProcessMemoryDetails(DWORD pid,
   outPrivateUsage = pmc.PrivateUsage;
   outPagefileUsage = pmc.PagefileUsage;
   return true;
+}
+
+static std::string WideToUtf8(const std::wstring& w) {
+  if (w.empty()) return std::string();
+  int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+  if (n <= 0) return std::string();
+  std::string out(n, 0);
+  WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()), &out[0], n, nullptr, nullptr);
+  return out;
+}
+
+static std::wstring QueryFullImagePath(HANDLE hProcess) {
+  wchar_t buf[4096];
+  DWORD sz = static_cast<DWORD>(sizeof(buf) / sizeof(buf[0]));
+  if (!QueryFullProcessImageNameW(hProcess, 0, buf, &sz)) return std::wstring();
+  return std::wstring(buf, sz);
+}
+
+// Win10+：与任务管理器同源思路（NtQueryInformationProcess + 命令行信息类）
+static std::wstring QueryProcessCommandLine(HANDLE hProcess) {
+  typedef NTSTATUS(NTAPI* NtQueryInformationProcessFn)(
+      HANDLE ProcessHandle,
+      PROCESSINFOCLASS ProcessInformationClass,
+      PVOID ProcessInformation,
+      ULONG ProcessInformationLength,
+      PULONG ReturnLength);
+
+  static NtQueryInformationProcessFn NtQueryInformationProcess =
+      reinterpret_cast<NtQueryInformationProcessFn>(
+          GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+  if (!NtQueryInformationProcess) return std::wstring();
+
+  enum { kProcessCommandLineInformation = 60 };
+  unsigned char buffer[65536];
+  ULONG retLen = 0;
+  NTSTATUS st = NtQueryInformationProcess(
+      hProcess,
+      static_cast<PROCESSINFOCLASS>(kProcessCommandLineInformation),
+      buffer,
+      sizeof(buffer),
+      &retLen);
+  if (!NT_SUCCESS(st) || retLen < sizeof(USHORT) * 2) return std::wstring();
+
+  UNICODE_STRING* us = reinterpret_cast<UNICODE_STRING*>(buffer);
+  if (us->Length == 0 || us->Buffer == nullptr) return std::wstring();
+
+  const unsigned char* base = buffer;
+  const unsigned char* end = buffer + retLen;
+  const unsigned char* bp = reinterpret_cast<const unsigned char*>(us->Buffer);
+  if (bp >= base && bp < end) {
+    return std::wstring(us->Buffer, us->Length / sizeof(wchar_t));
+  }
+
+  size_t wcharCount = us->Length / sizeof(wchar_t);
+  std::wstring out(wcharCount + 1, 0);
+  SIZE_T read = 0;
+  if (!ReadProcessMemory(hProcess, us->Buffer, &out[0], us->Length, &read)) return std::wstring();
+  out.resize(read / sizeof(wchar_t));
+  return out;
 }
 
 #endif // _WIN32
@@ -190,11 +262,88 @@ Napi::Value BatchGetProcessMemoryNapi(const Napi::CallbackInfo& info) {
   return result;
 }
 
+Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+#ifdef _WIN32
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "Expected rootPid (number)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD rootPid = info[0].As<Napi::Number>().Uint32Value();
+  Napi::Array out = Napi::Array::New(env);
+  if (rootPid == 0) return out;
+
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return out;
+
+  std::unordered_map<DWORD, std::vector<DWORD>> children;
+  std::unordered_map<DWORD, std::wstring> shortExe;
+  PROCESSENTRY32W pe;
+  pe.dwSize = sizeof(pe);
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      DWORD pid = pe.th32ProcessID;
+      DWORD ppid = pe.th32ParentProcessID;
+      children[ppid].push_back(pid);
+      shortExe[pid] = pe.szExeFile;
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+
+  std::vector<DWORD> order;
+  std::set<DWORD> visited;
+  std::queue<DWORD> q;
+  q.push(rootPid);
+  while (!q.empty()) {
+    DWORD cur = q.front();
+    q.pop();
+    if (!visited.insert(cur).second) continue;
+    order.push_back(cur);
+    auto it = children.find(cur);
+    if (it != children.end()) {
+      for (DWORD c : it->second) {
+        if (visited.find(c) == visited.end()) q.push(c);
+      }
+    }
+  }
+
+  uint32_t idx = 0;
+  for (DWORD pid : order) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    std::wstring exePath;
+    std::wstring cmdLine;
+    if (h) {
+      exePath = QueryFullImagePath(h);
+      cmdLine = QueryProcessCommandLine(h);
+      CloseHandle(h);
+    }
+    std::wstring shortName = shortExe.count(pid) ? shortExe[pid] : std::wstring();
+    std::wstring displayName = shortName;
+    if (!exePath.empty()) {
+      size_t pos = exePath.find_last_of(L"\\/");
+      if (pos != std::wstring::npos) displayName = exePath.substr(pos + 1);
+      else displayName = exePath;
+    }
+
+    Napi::Object row = Napi::Object::New(env);
+    row.Set("pid", Napi::Number::New(env, (double)pid));
+    row.Set("name", Napi::String::New(env, WideToUtf8(displayName)));
+    row.Set("exePath", Napi::String::New(env, WideToUtf8(exePath)));
+    row.Set("commandLine", Napi::String::New(env, WideToUtf8(cmdLine)));
+    out.Set(idx++, row);
+  }
+  return out;
+#else
+  return Napi::Array::New(env, 0);
+#endif
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("getProcessMemoryDetails", Napi::Function::New(env, GetProcessMemoryDetailsNapi));
   exports.Set("getPrivateWorkingSet", Napi::Function::New(env, GetPrivateWorkingSetNapi));
   exports.Set("batchGetPrivateWorkingSet", Napi::Function::New(env, BatchGetPrivateWorkingSetNapi));
   exports.Set("batchGetProcessMemory", Napi::Function::New(env, BatchGetProcessMemoryNapi));
+  exports.Set("enumerateProcessTree", Napi::Function::New(env, EnumerateProcessTreeNapi));
   return exports;
 }
 

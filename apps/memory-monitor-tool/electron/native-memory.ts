@@ -19,6 +19,8 @@ interface NativeMemoryModule {
   getPrivateWorkingSet(pid: number): number
   batchGetPrivateWorkingSet(pids: number[]): Record<string, number>
   batchGetProcessMemory(pids: number[]): Record<string, unknown>
+  /** Windows：Toolhelp32 + QueryFullProcessImageName + NtQueryInformationProcess */
+  enumerateProcessTree?(rootPid: number): unknown
 }
 
 let nativeModule: NativeMemoryModule | null = null
@@ -114,6 +116,45 @@ export interface ExternalNativeMemoryRow {
 
 export function isNativeMemoryLoaded(): boolean {
   return nativeModule !== null
+}
+
+/** C++ 枚举的根进程子树（与 PowerShell/WMI 结果字段对齐） */
+export interface NativeProcessTreeRow {
+  pid: number
+  name: string
+  exePath: string
+  commandLine: string
+}
+
+/**
+ * 同步：用 memory_native 走系统 API 枚举子树（镜像路径、命令行），避免 WMI。
+ * 未加载 native、导出不存在或调用失败时返回 null。
+ */
+export function enumerateProcessTreeNativeSync(rootPid: number): NativeProcessTreeRow[] | null {
+  if (!nativeModule || !IS_WINDOWS || !Number.isFinite(rootPid) || rootPid <= 0) return null
+  const mod = nativeModule
+  if (typeof mod.enumerateProcessTree !== 'function') return null
+  try {
+    const raw = mod.enumerateProcessTree(Math.floor(rootPid)) as unknown
+    if (!Array.isArray(raw) || raw.length === 0) return null
+    const out: NativeProcessTreeRow[] = []
+    for (const item of raw) {
+      if (item == null || typeof item !== 'object') continue
+      const o = item as Record<string, unknown>
+      const pid = typeof o.pid === 'number' ? o.pid : Number(o.pid)
+      if (!Number.isFinite(pid) || pid <= 0) continue
+      out.push({
+        pid: Math.floor(pid),
+        name: typeof o.name === 'string' ? o.name : '',
+        exePath: typeof o.exePath === 'string' ? o.exePath : '',
+        commandLine: typeof o.commandLine === 'string' ? o.commandLine : '',
+      })
+    }
+    return out.length > 0 ? out : null
+  } catch (e) {
+    console.warn('[MonitorTool] enumerateProcessTreeNativeSync failed:', e)
+    return null
+  }
 }
 
 /**
