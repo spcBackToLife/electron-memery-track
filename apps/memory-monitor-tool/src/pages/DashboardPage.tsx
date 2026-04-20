@@ -239,8 +239,17 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         <div className="chart-container chart-wide">
           <h3>📈 内存趋势</h3>
           <p className="chart-caption">
-            展示总内存及各类型进程的实时变化趋势。关注曲线是否持续上升——这可能是内存泄漏的信号。
-            使用「事件标记」记录关键操作点，方便后续定位问题。
+            {externalMonitor ? (
+              <>
+                <strong>进程树合计</strong>（紫色）为勾选「计入合计」后的汇总；彩色折线为<strong>各 PID 单独占用</strong>
+                （按本会话内峰值内存取前 12 名，其余进程合并为灰色虚线「其余…合计」）。关注单条曲线持续爬升可定位到具体子进程。
+              </>
+            ) : (
+              <>
+                展示总内存及各类型进程的实时变化趋势。关注曲线是否持续上升——这可能是内存泄漏的信号。
+                使用「事件标记」记录关键操作点，方便后续定位问题。
+              </>
+            )}
           </p>
           <MemoryTrendChart snapshots={snapshots} height={320} />
         </div>
@@ -261,7 +270,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         <h3>📋 进程列表</h3>
         <p className="table-caption">
           {externalMonitor
-            ? '列出已启动 exe 进程树中的各进程（按内存降序）。「计入合计」决定该 PID 是否参与上方「进程树合计」与趋势图总曲线；默认全选，可取消勾选误采样的进程。'
+            ? '列出已启动 exe 进程树中的各进程（按内存降序）。「计入合计」决定该 PID 是否参与上方「进程树合计」汇总线；趋势图中各 PID 分线仍显示该进程实际占用。默认全选，可取消勾选误采样的进程。'
             : '列出本工具（Electron）各子进程内存占用，按内存降序排列。'}
         </p>
         {externalMonitor ? (

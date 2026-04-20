@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
-import type { TestSession, ReportSummary } from '../types'
+import type { MemorySnapshot, ReportEventMark, TestSession, ReportSummary } from '../types'
 import { formatDuration, formatTime } from '../utils/format'
+import { collectReportEventMarksFromSnapshots } from '../utils/reportEventMarks'
 import { useToast } from '../context/ToastContext'
 import ReportDataCharts from '../components/ReportDataCharts'
 
@@ -13,6 +14,8 @@ const ReportPage: React.FC = () => {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [report, setReport] = useState<ReportSummary | null>(null)
   const [loading, setLoading] = useState(false)
+  /** 旧版 report.json 无 eventMarks 时，从快照推导 */
+  const [marksFallback, setMarksFallback] = useState<ReportEventMark[]>([])
   const { showToast } = useToast()
 
   const loadSessions = useCallback(async () => {
@@ -53,6 +56,26 @@ const ReportPage: React.FC = () => {
     }
   }, [selectedId, loadReport])
 
+  useEffect(() => {
+    setMarksFallback([])
+    if (!selectedId || !report) return
+    /** 新版 report.json 总带 eventMarks 字段；仅旧文件缺字段时才从快照推导 */
+    if (report.eventMarks !== undefined) return
+    let cancelled = false
+    void (async () => {
+      try {
+        const snaps = (await window.monitorAPI.getSessionSnapshots(selectedId, 2000)) as MemorySnapshot[]
+        if (cancelled) return
+        setMarksFallback(collectReportEventMarksFromSnapshots(snaps))
+      } catch {
+        if (!cancelled) setMarksFallback([])
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [selectedId, report])
+
   const handleDelete = async (sessionId: string) => {
     try {
       const success = await window.monitorAPI.deleteSession(sessionId)
@@ -81,6 +104,9 @@ const ReportPage: React.FC = () => {
       showToast(`导出失败: ${err}`, 'error')
     }
   }
+
+  const marksForTable =
+    report != null && report.eventMarks !== undefined ? report.eventMarks : marksFallback
 
   const conclusionConfig: Record<string, { label: string; color: string; icon: string }> = {
     PASS: { label: '通过', color: '#52c41a', icon: '✅' },
@@ -154,7 +180,44 @@ const ReportPage: React.FC = () => {
                 <p className="conclusion-reason">{report.trendAnalysis.reason}</p>
               </div>
 
-              <ReportDataCharts report={report} />
+              <ReportDataCharts report={report} eventMarks={marksForTable.length > 0 ? marksForTable : undefined} />
+
+              {marksForTable.length > 0 && (
+                <div className="report-event-marks">
+                  <h3>📍 阶段标记（Mark）</h3>
+                  <p className="chart-caption">
+                    与实时监控「📌 标记」一致：写入<strong>下一拍采样</strong>。表中为标记时刻各分类内存（KB→MB），便于对照趋势图竖线。
+                  </p>
+                  <div className="report-marks-table-wrap">
+                    <table className="data-table report-marks-table">
+                      <thead>
+                        <tr>
+                          <th>#</th>
+                          <th>时间</th>
+                          <th>标签</th>
+                          <th>总内存 (MB)</th>
+                          <th>主进程 (MB)</th>
+                          <th>渲染/子进程 (MB)</th>
+                          <th>GPU (MB)</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {marksForTable.map((m, i) => (
+                          <tr key={`${m.timestamp}-${m.label}-${i}`}>
+                            <td>{i + 1}</td>
+                            <td>{formatTime(m.timestamp)}</td>
+                            <td className="report-mark-label-cell">{m.label}</td>
+                            <td>{(m.totalWorkingSetKB / 1024).toFixed(1)}</td>
+                            <td>{(m.browserKB / 1024).toFixed(1)}</td>
+                            <td>{(m.rendererKB / 1024).toFixed(1)}</td>
+                            <td>{(m.gpuKB / 1024).toFixed(1)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {/* 统计摘要 */}
               <div className="report-summary">

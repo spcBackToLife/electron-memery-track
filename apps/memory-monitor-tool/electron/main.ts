@@ -319,6 +319,45 @@ function getEffectiveMemoryKB(mem: ProcessMemoryInfo['memory']): number {
   return mem.privateWorkingSet ?? mem.workingSetSize
 }
 
+/** 与前端 ReportEventMark / SDK SessionEventMark 字段对齐，写入 report.json */
+interface ReportEventMarkRow {
+  timestamp: number
+  label: string
+  metadata?: Record<string, unknown>
+  totalWorkingSetKB: number
+  browserKB: number
+  rendererKB: number
+  gpuKB: number
+}
+
+function collectReportEventMarks(snapshots: MemorySnapshot[]): ReportEventMarkRow[] {
+  const out: ReportEventMarkRow[] = []
+  for (const s of snapshots) {
+    if (!s.marks?.length) continue
+    const browserKB = s.processes
+      .filter((p) => p.type === 'Browser')
+      .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
+    const rendererKB = s.processes
+      .filter((p) => p.type === 'Tab')
+      .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
+    const gpuKB = s.processes
+      .filter((p) => p.type === 'GPU')
+      .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
+    for (const m of s.marks) {
+      out.push({
+        timestamp: m.timestamp,
+        label: m.label,
+        metadata: m.metadata,
+        totalWorkingSetKB: s.totalWorkingSetSize,
+        browserKB,
+        rendererKB,
+        gpuKB,
+      })
+    }
+  }
+  return out
+}
+
 // ============ 数据采集 ============
 
 function buildSnapshotSelf(): MemorySnapshot {
@@ -637,6 +676,8 @@ interface ReportSummary {
     labels: Record<string, string>
     note: string
   }
+
+  eventMarks?: ReportEventMarkRow[]
 }
 
 function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]): ReportSummary {
@@ -652,6 +693,7 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
       summary: { peakTotalMB: 0, avgTotalMB: 0, finalTotalMB: 0, peakBrowserMB: 0, peakRendererMB: 0, peakProcessCount: 0 },
       trendAnalysis: { hasGrowthTrend: false, growthRatePerMin: 0, growthAmountMB: 0, conclusion: 'PASS', reason: '无数据' },
       dataPoints: [],
+      eventMarks: [],
     }
   }
 
@@ -771,6 +813,7 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
     },
 
     dataPoints,
+    eventMarks: collectReportEventMarks(snapshots),
     ...(externalTotalMemoryBasis ? { externalTotalMemoryBasis } : {}),
   }
 }

@@ -72,6 +72,17 @@ export interface SessionsListPayload {
 
 // ============ 报告（面向测试的解读型报告） ============
 
+/** 阶段标记 + 该拍快照时的分类内存（KB），与 SDK SessionEventMark 对齐便于对照 */
+export interface ReportEventMark {
+  timestamp: number
+  label: string
+  metadata?: Record<string, unknown>
+  totalWorkingSetKB: number
+  browserKB: number
+  rendererKB: number
+  gpuKB: number
+}
+
 export interface ReportSummary {
   sessionId: string
   label: string
@@ -119,6 +130,9 @@ export interface ReportSummary {
     labels: Record<string, string>
     note: string
   }
+
+  /** 阶段标记汇总（写入 report.json；旧报告可能缺省，可由快照兜底推导） */
+  eventMarks?: ReportEventMark[]
 }
 
 // ============ 对比结果 ============

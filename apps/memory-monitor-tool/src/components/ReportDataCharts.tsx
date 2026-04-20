@@ -8,8 +8,9 @@ import {
   Tooltip,
   Legend,
   ResponsiveContainer,
+  ReferenceLine,
 } from 'recharts'
-import type { ReportSummary } from '../types'
+import type { ReportEventMark, ReportSummary } from '../types'
 
 const formatAxisTime = (ts: number): string => {
   const d = new Date(ts)
@@ -18,13 +19,16 @@ const formatAxisTime = (ts: number): string => {
 
 interface ReportDataChartsProps {
   report: ReportSummary
+  /** 与 report.eventMarks 一致；可传入从快照兜底的标记，便于旧报告 */
+  eventMarks?: ReportEventMark[]
 }
 
 /**
  * 测试报告页：根据 dataPoints 还原总内存 / 主进程 / 渲染 / GPU 趋势
  */
-const ReportDataCharts: React.FC<ReportDataChartsProps> = ({ report }) => {
+const ReportDataCharts: React.FC<ReportDataChartsProps> = ({ report, eventMarks }) => {
   const chartData = useMemo(() => report.dataPoints, [report.dataPoints])
+  const marks = eventMarks ?? report.eventMarks ?? []
 
   if (chartData.length < 2) return null
 
@@ -34,7 +38,10 @@ const ReportDataCharts: React.FC<ReportDataChartsProps> = ({ report }) => {
   return (
     <div className="mmt-history-charts">
       <h3>📈 内存趋势（本会话）</h3>
-      <p className="chart-caption">基于会话内采样点绘制，与实时监控页指标口径一致。</p>
+      <p className="chart-caption">
+        基于会话内采样点绘制，与实时监控页指标口径一致。
+        {marks.length > 0 ? ' 橙色竖线为事件标记时刻（与下方「阶段标记」表对应）。' : ''}
+      </p>
       <ResponsiveContainer width="100%" height={320}>
         <LineChart data={chartData} margin={{ top: 8, right: 28, left: 8, bottom: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
@@ -63,6 +70,16 @@ const ReportDataCharts: React.FC<ReportDataChartsProps> = ({ report }) => {
           <Line type="monotone" dataKey="browserMB" name="主进程" stroke="#f5a623" dot={false} strokeWidth={1.5} />
           <Line type="monotone" dataKey="rendererMB" name="渲染/子进程" stroke="#61dafb" dot={false} strokeWidth={1.5} />
           <Line type="monotone" dataKey="gpuMB" name="GPU" stroke="#ff6b6b" dot={false} strokeWidth={1.5} />
+          {marks.map((mark, idx) => (
+            <ReferenceLine
+              key={`${mark.timestamp}-${idx}-${mark.label}`}
+              x={mark.timestamp}
+              stroke="#faad14"
+              strokeDasharray="4 3"
+              strokeWidth={1.5}
+              label={{ value: mark.label, position: 'top', fill: '#faad14', fontSize: 10 }}
+            />
+          ))}
         </LineChart>
       </ResponsiveContainer>
     </div>
