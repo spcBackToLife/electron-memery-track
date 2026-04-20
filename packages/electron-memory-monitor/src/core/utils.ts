@@ -2,6 +2,15 @@
  * 工具函数
  */
 
+/**
+ * 获取进程的有效内存值（KB）。
+ * 优先使用专用工作集（Private Working Set，即 Windows 任务管理器默认「内存」列），
+ * 若不可用则回退到工作集大小（Working Set）。
+ */
+export function getEffectiveMemoryKB(memory: { workingSetSize: number; privateWorkingSet?: number }): number {
+  return memory.privateWorkingSet ?? memory.workingSetSize
+}
+
 /** 简单的 UUID v4 生成（不依赖外部库） */
 export function v4(): string {
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {

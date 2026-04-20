@@ -13,6 +13,7 @@ import type { MemoryData } from '../hooks/useMemoryData'
 import type { AnomalyAction } from '../../types/anomaly'
 import type { GCResult } from '../../types/report'
 import { useToast } from '../context/ToastContext'
+import { getEffectiveMemoryKB } from '../../core/utils'
 
 const formatKB = (kb: number | undefined | null): string => {
   if (kb == null || isNaN(kb)) return '0 KB'
@@ -140,7 +141,7 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true, memoryData })
 
   const browserProcess = latestSnapshot.processes.find((p) => p.type === 'Browser')
   const rendererProcesses = latestSnapshot.processes.filter((p) => p.type === 'Tab' && !p.isMonitorProcess)
-  const rendererTotalKB = rendererProcesses.reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+  const rendererTotalKB = rendererProcesses.reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
 
   return (
     <div className="dashboard">
@@ -170,7 +171,7 @@ const Dashboard: React.FC<DashboardProps> = ({ paneVisible = true, memoryData })
         <MetricCard
           icon="🧠"
           title="Browser 工作集"
-          value={formatKB(browserProcess?.memory.workingSetSize || 0)}
+          value={formatKB(browserProcess ? getEffectiveMemoryKB(browserProcess.memory) : 0)}
           color="#f5a623"
         />
         <MetricCard

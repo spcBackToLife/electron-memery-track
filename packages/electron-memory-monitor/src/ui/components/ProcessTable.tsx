@@ -1,5 +1,6 @@
 import React from 'react'
 import type { ProcessMemoryInfo } from '../../types/snapshot'
+import { getEffectiveMemoryKB } from '../../core/utils'
 
 interface ProcessTableProps {
   processes: ProcessMemoryInfo[]
@@ -38,7 +39,7 @@ const formatPrivate = (kb: number | undefined): string => {
 }
 
 const ProcessTable: React.FC<ProcessTableProps> = ({ processes }) => {
-  const sorted = [...processes].sort((a, b) => b.memory.workingSetSize - a.memory.workingSetSize)
+  const sorted = [...processes].sort((a, b) => getEffectiveMemoryKB(b.memory) - getEffectiveMemoryKB(a.memory))
 
   // 检测是否有任何进程附带了 privateWorkingSet 数据（Windows 才有）
   const hasPrivateWs = sorted.some((p) => p.memory.privateWorkingSet != null)

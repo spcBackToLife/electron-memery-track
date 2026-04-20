@@ -21,6 +21,7 @@ import type {
 } from '../types/snapshot'
 import type { MonitorConfig } from '../types/config'
 import { createPrivateWsProvider, getNativeModuleStatus, type PrivateWorkingSetProvider } from './native-memory'
+import { getEffectiveMemoryKB } from './utils'
 
 export class MemoryCollector extends EventEmitter {
   private config: MonitorConfig
@@ -120,9 +121,9 @@ export class MemoryCollector extends EventEmitter {
     const mainProcessV8Detail = this.collectMainProcessV8Detail()
     const system = this.collectSystemMemory()
 
-    // 计算总工作集大小（排除监控面板自身进程）
+    // 计算总内存（优先使用专用工作集，不可用时回退到工作集大小）
     const totalWorkingSetSize = processes.reduce(
-      (sum, p) => p.isMonitorProcess ? sum : sum + p.memory.workingSetSize,
+      (sum, p) => p.isMonitorProcess ? sum : sum + getEffectiveMemoryKB(p.memory),
       0
     )
 

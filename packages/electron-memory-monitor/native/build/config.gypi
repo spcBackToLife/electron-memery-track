@@ -441,6 +441,7 @@
     "npm_globalconfig": "C:\\nvm4w\\nodejs\\etc\\npmrc",
     "npm_version": "10.8.2",
     "onlyBuiltDependencies_": "true",
+    "onlybuiltdependencies_undefined": "true",
     "prefix": "C:\\nvm4w\\nodejs",
     "recursive": "true",
     "registry": "https://mirrors.tencent.com/npm/",

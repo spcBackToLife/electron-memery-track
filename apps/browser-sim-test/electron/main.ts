@@ -567,7 +567,7 @@ ipcMain.handle('browser:get-memory-info', () => {
     tabCount: tabViews.size,
     processCount: metrics.length,
     totalMemory: metrics.reduce(
-      (sum, m) => sum + (m.memory?.workingSetSize || 0),
+      (sum, m) => sum + (m.memory?.privateWorkingSet ?? m.memory?.workingSetSize || 0),
       0
     ),
     mainProcessMemory: process.memoryUsage(),

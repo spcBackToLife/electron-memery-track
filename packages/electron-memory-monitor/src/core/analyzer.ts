@@ -8,7 +8,7 @@
  */
 
 import * as os from 'os'
-import { percentile, average, linearRegression, kbToBytes } from './utils'
+import { percentile, average, linearRegression, kbToBytes, getEffectiveMemoryKB } from './utils'
 import type { MemorySnapshot } from '../types/snapshot'
 import type { AnomalyEvent } from '../types/anomaly'
 import type {
@@ -162,13 +162,13 @@ export class Analyzer {
       if (!s.marks?.length) continue
       const browserKB = s.processes
         .filter((p) => p.type === 'Browser')
-        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+        .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
       const rendererKB = s.processes
         .filter((p) => p.type === 'Tab' && !p.isMonitorProcess)
-        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+        .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
       const gpuKB = s.processes
         .filter((p) => p.type === 'GPU')
-        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+        .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
       for (const m of s.marks) {
         out.push({
           timestamp: m.timestamp,
@@ -207,9 +207,9 @@ export class Analyzer {
     // 总内存 (KB)
     const totalMemoryValues = snapshots.map((s) => s.totalWorkingSetSize)
 
-    // 按类型分组
+    // 按类型分组（优先使用专用工作集）
     const browserValues = snapshots.map((s) =>
-      s.processes.filter((p) => p.type === 'Browser').reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      s.processes.filter((p) => p.type === 'Browser').reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     )
 
     // 渲染进程 - 收集每个渲染进程的数据
@@ -217,13 +217,13 @@ export class Analyzer {
 
     // GPU 进程
     const gpuValues = snapshots.map((s) =>
-      s.processes.filter((p) => p.type === 'GPU').reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      s.processes.filter((p) => p.type === 'GPU').reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     )
     const hasGpu = gpuValues.some((v) => v > 0)
 
     // Utility 进程
     const utilityValues = snapshots.map((s) =>
-      s.processes.filter((p) => p.type === 'Utility').reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      s.processes.filter((p) => p.type === 'Utility').reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     )
     const hasUtility = utilityValues.some((v) => v > 0)
 
@@ -233,9 +233,9 @@ export class Analyzer {
     const externalValues = snapshots.map((s) => s.mainProcessMemory.external)
     const arrayBufferValues = snapshots.map((s) => s.mainProcessMemory.arrayBuffers)
 
-    // 渲染进程总内存
+    // 渲染进程总内存（优先使用专用工作集）
     const rendererTotalValues = snapshots.map((s) =>
-      s.processes.filter((p) => p.type === 'Tab' && !p.isMonitorProcess).reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      s.processes.filter((p) => p.type === 'Tab' && !p.isMonitorProcess).reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     )
 
     return {
@@ -282,7 +282,7 @@ export class Analyzer {
       const values = snapshots
         .map((s) => {
           const proc = s.processes.find((p) => p.pid === pid)
-          return proc ? proc.memory.workingSetSize : null
+          return proc ? getEffectiveMemoryKB(proc.memory) : null
         })
         .filter((v): v is number => v !== null)
 
