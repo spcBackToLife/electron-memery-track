@@ -6,6 +6,7 @@
  */
 
 import { app, BrowserWindow } from 'electron'
+import path from 'path'
 import { ElectronMemoryMonitor } from '@electron-memory/monitor'
 
 // 一行代码接入监控
@@ -18,15 +19,28 @@ const monitor = new ElectronMemoryMonitor({
 
 let mainWindow: BrowserWindow | null = null
 
+// ====== 进程命名（Windows 任务管理器可见） ======
+const APP_NAME = 'BareMinimum'
+app.setName(APP_NAME)
+
+// ====== 路径配置（与 browser-sim 保持一致） ======
+const __dirname_electron = path.dirname(__filename)
+const RENDERER_DIST = path.join(__dirname_electron, '../dist')
+const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
+
 app.whenReady().then(() => {
   mainWindow = new BrowserWindow({
     width: 800,
     height: 600,
-    title: 'bare-minimum',
+    title: `${APP_NAME}-Renderer`,
   })
 
-  // 只加载空白页，不加载任何实际内容
-  mainWindow.loadURL('about:blank')
+  // 开发模式用 Vite dev server，生产模式加载打包后的 dist/index.html
+  if (VITE_DEV_SERVER_URL) {
+    mainWindow.loadURL(VITE_DEV_SERVER_URL)
+  } else {
+    mainWindow.loadFile(path.join(RENDERER_DIST, 'index.html'))
+  }
 
   mainWindow.on('closed', () => {
     mainWindow = null

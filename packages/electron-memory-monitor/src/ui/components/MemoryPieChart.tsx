@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react'
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import type { ProcessMemoryInfo } from '../../types/snapshot'
+import { getEffectiveMemoryKB } from '../../core/utils'
 
 interface MemoryPieChartProps {
   processes: ProcessMemoryInfo[]
@@ -68,7 +69,7 @@ const MemoryPieChart: React.FC<MemoryPieChartProps> = ({ processes, height = 280
       // 排除监控面板自身进程
       if (p.isMonitorProcess) continue
       const key = p.type
-      grouped.set(key, (grouped.get(key) || 0) + p.memory.workingSetSize)
+      grouped.set(key, (grouped.get(key) || 0) + getEffectiveMemoryKB(p.memory))
     }
     return Array.from(grouped.entries())
       .map(([type, value]) => ({

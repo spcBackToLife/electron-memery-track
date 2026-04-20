@@ -11,6 +11,7 @@ import {
   ReferenceLine,
 } from 'recharts'
 import type { MemorySnapshot, EventMark } from '../../types/snapshot'
+import { getEffectiveMemoryKB } from '../../core/utils'
 
 interface MemoryChartProps {
   snapshots: MemorySnapshot[]
@@ -40,17 +41,17 @@ const MemoryChart: React.FC<MemoryChartProps> = ({ snapshots, height = 300 }) =>
     return snapshots.map((s) => {
       const browserMem = s.processes
         .filter((p) => p.type === 'Browser')
-        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+        .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
       const rendererMem = s.processes
         .filter((p) => p.type === 'Tab' && !p.isMonitorProcess)
-        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+        .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
       const gpuMem = s.processes
         .filter((p) => p.type === 'GPU')
-        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+        .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
       // 其他进程：Utility、Zygote 等（排除监控面板自身）
       const otherMem = s.processes
         .filter((p) => !p.isMonitorProcess && p.type !== 'Browser' && p.type !== 'GPU' && p.type !== 'Tab')
-        .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+        .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
 
       return {
         timestamp: s.timestamp,

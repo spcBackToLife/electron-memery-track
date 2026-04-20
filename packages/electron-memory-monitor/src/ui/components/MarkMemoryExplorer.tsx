@@ -14,6 +14,7 @@ import V8HeapDetail from './V8HeapDetail'
 import RendererV8Table from './RendererV8Table'
 import { listMarksWithSnapshots, type MarkWithSnapshot } from '../utils/marksWithSnapshots'
 import type { MemorySnapshot } from '../../types/snapshot'
+import { getEffectiveMemoryKB } from '../../core/utils'
 
 const COLORS = {
   browser: '#f5a623',
@@ -29,20 +30,20 @@ const formatTime = (ts: number): string => {
 
 const truncate = (s: string, max: number): string => (s.length <= max ? s : `${s.slice(0, max - 1)}…`)
 
-/** 从快照拆出与趋势图一致的四类工作集 (MB) */
+/** 从快照拆出与趋势图一致的四类内存 (MB)，优先使用专用工作集 */
 function breakdownMB(s: MemorySnapshot) {
   const browserMem = s.processes
     .filter((p) => p.type === 'Browser')
-    .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+    .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
   const rendererMem = s.processes
     .filter((p) => p.type === 'Tab' && !p.isMonitorProcess)
-    .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+    .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
   const gpuMem = s.processes
     .filter((p) => p.type === 'GPU')
-    .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+    .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
   const otherMem = s.processes
     .filter((p) => !p.isMonitorProcess && p.type !== 'Browser' && p.type !== 'GPU' && p.type !== 'Tab')
-    .reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+    .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
   return {
     browser: Math.round((browserMem / 1024) * 10) / 10,
     renderer: Math.round((rendererMem / 1024) * 10) / 10,

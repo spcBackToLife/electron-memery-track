@@ -164,6 +164,54 @@ function getNativeModuleStatus() {
   };
 }
 
+// src/core/utils.ts
+function getEffectiveMemoryKB(memory) {
+  return memory.privateWorkingSet ?? memory.workingSetSize;
+}
+function v4() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === "x" ? r : r & 3 | 8;
+    return v.toString(16);
+  });
+}
+function percentile(arr, p) {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = p / 100 * (sorted.length - 1);
+  const lower = Math.floor(idx);
+  const upper = Math.ceil(idx);
+  if (lower === upper) return sorted[lower];
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (idx - lower);
+}
+function average(arr) {
+  if (arr.length === 0) return 0;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+function linearRegression(values, timestamps) {
+  const n = values.length;
+  if (n < 2) return { slope: 0, r2: 0, intercept: values[0] || 0 };
+  const t0 = timestamps[0];
+  const xs = timestamps.map((t) => (t - t0) / 1e3);
+  const sumX = xs.reduce((a, b) => a + b, 0);
+  const sumY = values.reduce((a, b) => a + b, 0);
+  const sumXY = xs.reduce((sum, x, i) => sum + x * values[i], 0);
+  const sumX2 = xs.reduce((sum, x) => sum + x * x, 0);
+  const sumY2 = values.reduce((sum, y) => sum + y * y, 0);
+  const denominator = n * sumX2 - sumX * sumX;
+  if (denominator === 0) return { slope: 0, r2: 0, intercept: sumY / n };
+  const slope = (n * sumXY - sumX * sumY) / denominator;
+  const intercept = (sumY - slope * sumX) / n;
+  const meanY = sumY / n;
+  const ssTotal = sumY2 - n * meanY * meanY;
+  const ssResidual = values.reduce((sum, y, i) => {
+    const predicted = intercept + slope * xs[i];
+    return sum + (y - predicted) ** 2;
+  }, 0);
+  const r2 = ssTotal === 0 ? 0 : 1 - ssResidual / ssTotal;
+  return { slope, r2, intercept };
+}
+
 // src/core/collector.ts
 var MemoryCollector = class extends import_events.EventEmitter {
   constructor(config) {
@@ -241,7 +289,7 @@ var MemoryCollector = class extends import_events.EventEmitter {
     const mainProcessV8Detail = this.collectMainProcessV8Detail();
     const system = this.collectSystemMemory();
     const totalWorkingSetSize = processes.reduce(
-      (sum, p) => p.isMonitorProcess ? sum : sum + p.memory.workingSetSize,
+      (sum, p) => p.isMonitorProcess ? sum : sum + getEffectiveMemoryKB(p.memory),
       0
     );
     const marks = this.pendingMarks.length > 0 ? [...this.pendingMarks] : void 0;
@@ -578,51 +626,6 @@ var DataPersister = class {
     }
   }
 };
-
-// src/core/utils.ts
-function v4() {
-  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
-    const r = Math.random() * 16 | 0;
-    const v = c === "x" ? r : r & 3 | 8;
-    return v.toString(16);
-  });
-}
-function percentile(arr, p) {
-  if (arr.length === 0) return 0;
-  const sorted = [...arr].sort((a, b) => a - b);
-  const idx = p / 100 * (sorted.length - 1);
-  const lower = Math.floor(idx);
-  const upper = Math.ceil(idx);
-  if (lower === upper) return sorted[lower];
-  return sorted[lower] + (sorted[upper] - sorted[lower]) * (idx - lower);
-}
-function average(arr) {
-  if (arr.length === 0) return 0;
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
-}
-function linearRegression(values, timestamps) {
-  const n = values.length;
-  if (n < 2) return { slope: 0, r2: 0, intercept: values[0] || 0 };
-  const t0 = timestamps[0];
-  const xs = timestamps.map((t) => (t - t0) / 1e3);
-  const sumX = xs.reduce((a, b) => a + b, 0);
-  const sumY = values.reduce((a, b) => a + b, 0);
-  const sumXY = xs.reduce((sum, x, i) => sum + x * values[i], 0);
-  const sumX2 = xs.reduce((sum, x) => sum + x * x, 0);
-  const sumY2 = values.reduce((sum, y) => sum + y * y, 0);
-  const denominator = n * sumX2 - sumX * sumX;
-  if (denominator === 0) return { slope: 0, r2: 0, intercept: sumY / n };
-  const slope = (n * sumXY - sumX * sumY) / denominator;
-  const intercept = (sumY - slope * sumX) / n;
-  const meanY = sumY / n;
-  const ssTotal = sumY2 - n * meanY * meanY;
-  const ssResidual = values.reduce((sum, y, i) => {
-    const predicted = intercept + slope * xs[i];
-    return sum + (y - predicted) ** 2;
-  }, 0);
-  const r2 = ssTotal === 0 ? 0 : 1 - ssResidual / ssTotal;
-  return { slope, r2, intercept };
-}
 
 // src/core/session.ts
 var SessionManager = class {
@@ -1028,9 +1031,9 @@ var Analyzer = class {
     const out = [];
     for (const s of snapshots) {
       if (!s.marks?.length) continue;
-      const browserKB = s.processes.filter((p) => p.type === "Browser").reduce((sum, p) => sum + p.memory.workingSetSize, 0);
-      const rendererKB = s.processes.filter((p) => p.type === "Tab" && !p.isMonitorProcess).reduce((sum, p) => sum + p.memory.workingSetSize, 0);
-      const gpuKB = s.processes.filter((p) => p.type === "GPU").reduce((sum, p) => sum + p.memory.workingSetSize, 0);
+      const browserKB = s.processes.filter((p) => p.type === "Browser").reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0);
+      const rendererKB = s.processes.filter((p) => p.type === "Tab" && !p.isMonitorProcess).reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0);
+      const gpuKB = s.processes.filter((p) => p.type === "GPU").reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0);
       for (const m of s.marks) {
         out.push({
           timestamp: m.timestamp,
@@ -1063,15 +1066,15 @@ var Analyzer = class {
     const processCounts = snapshots.map((s) => s.processes.length);
     const totalMemoryValues = snapshots.map((s) => s.totalWorkingSetSize);
     const browserValues = snapshots.map(
-      (s) => s.processes.filter((p) => p.type === "Browser").reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      (s) => s.processes.filter((p) => p.type === "Browser").reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     );
     const rendererSummaries = this.computeRendererSummaries(snapshots);
     const gpuValues = snapshots.map(
-      (s) => s.processes.filter((p) => p.type === "GPU").reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      (s) => s.processes.filter((p) => p.type === "GPU").reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     );
     const hasGpu = gpuValues.some((v) => v > 0);
     const utilityValues = snapshots.map(
-      (s) => s.processes.filter((p) => p.type === "Utility").reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      (s) => s.processes.filter((p) => p.type === "Utility").reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     );
     const hasUtility = utilityValues.some((v) => v > 0);
     const heapUsedValues = snapshots.map((s) => s.mainProcessMemory.heapUsed);
@@ -1079,7 +1082,7 @@ var Analyzer = class {
     const externalValues = snapshots.map((s) => s.mainProcessMemory.external);
     const arrayBufferValues = snapshots.map((s) => s.mainProcessMemory.arrayBuffers);
     const rendererTotalValues = snapshots.map(
-      (s) => s.processes.filter((p) => p.type === "Tab" && !p.isMonitorProcess).reduce((sum, p) => sum + p.memory.workingSetSize, 0)
+      (s) => s.processes.filter((p) => p.type === "Tab" && !p.isMonitorProcess).reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     );
     return {
       totalProcesses: {
@@ -1120,7 +1123,7 @@ var Analyzer = class {
     for (const pid of allPids) {
       const values = snapshots.map((s) => {
         const proc = s.processes.find((p) => p.pid === pid);
-        return proc ? proc.memory.workingSetSize : null;
+        return proc ? getEffectiveMemoryKB(proc.memory) : null;
       }).filter((v) => v !== null);
       if (values.length > 0) {
         summaries.push(this.computeMetricSummary(values));
