@@ -15,8 +15,12 @@ import {
   getNativeModuleStatus,
   readExternalProcessMemoryNativeSync,
   enumerateProcessTreeNativeSync,
+  gatherExternalMonitorSnapshotAsync,
   isNativeMemoryLoaded,
   batchGetProcessTimesAndIoSync,
+  type ExternalGatheredSnapshotPayload,
+  type ExternalNativeMemoryRow,
+  type NativeProcessTreeRow,
   type ProcessTimesIoRow,
 } from './native-memory'
 import { fetchWindowsProcessTree } from './external-process-tree'
@@ -129,6 +133,8 @@ let pendingMarks: EventMark[] = []
 
 /** 定时采集器 */
 let collectTimer: ReturnType<typeof setInterval> | null = null
+/** 采集 tick 串行队列：异步 gather 可能长于 interval，避免整拍丢弃（原 inFlight 直接 return 会长期无快照） */
+let collectTickChain: Promise<void> = Promise.resolve()
 /** 用于 MMT_PERF_CHAIN 观察 setInterval 是否漂移（GC/同步磁盘阻塞） */
 let lastCollectScheduledAt = 0
 
@@ -211,7 +217,7 @@ function maybeRefreshPrivateWs(pids: number[]): void {
 
 function maybeRefreshExternalTree(): void {
   if (process.platform !== 'win32' || monitoredRootPid == null) return
-  // 已加载 Native 时子树在 buildSnapshotExternal 开头每拍同步 enumerate，此处再跑异步会与当前拍竞态且徒增开销
+  // 已加载 Native 时子树由 gatherExternalMonitorSnapshotAsync（线程池）刷新；此处不再起 WMI 子进程
   if (isNativeMemoryLoaded()) return
 
   const now = Date.now()
@@ -356,15 +362,7 @@ function filterExternalPidsToSameApp(
   })
 }
 
-/**
- * 每拍同步：用 Native 重枚举根 PID 子树并写回缓存。
- * 避免「进程表 2.5s 才刷新」时仍保留已退出 PID；PID 复用后短暂把别的进程挂到旧行上，看起来像多出来又消失。
- */
-function syncExternalProcessTreeFromNative(rootPid: number): void {
-  if (!isNativeMemoryLoaded()) return
-  const rows = enumerateProcessTreeNativeSync(rootPid)
-  if (rows == null || rows.length === 0) return
-
+function applyExternalStateFromTreeRows(rootPid: number, rows: NativeProcessTreeRow[]): void {
   const pids: number[] = []
   const names = new Map<number, string>()
   const exePath = new Map<number, string>()
@@ -377,6 +375,17 @@ function syncExternalProcessTreeFromNative(rootPid: number): void {
   }
   applyExternalTreeFetchResult(rootPid, pids, names, exePath, commandLine)
   externalTreeLastRefresh = Date.now()
+}
+
+/**
+ * 每拍同步：用 Native 重枚举根 PID 子树并写回缓存。
+ * 避免「进程表 2.5s 才刷新」时仍保留已退出 PID；PID 复用后短暂把别的进程挂到旧行上，看起来像多出来又消失。
+ */
+function syncExternalProcessTreeFromNative(rootPid: number): void {
+  if (!isNativeMemoryLoaded()) return
+  const rows = enumerateProcessTreeNativeSync(rootPid)
+  if (rows == null || rows.length === 0) return
+  applyExternalStateFromTreeRows(rootPid, rows)
 }
 
 function applyExternalTreeFetchResult(
@@ -541,17 +550,14 @@ function parseChromiumProcessRole(cmd: string | undefined): string | undefined {
   return raw.length > 64 ? `${raw.slice(0, 61)}...` : raw
 }
 
-function buildSnapshotExternal(): MemorySnapshot {
-  const timestamp = Date.now()
-  const root = monitoredRootPid!
-  syncExternalProcessTreeFromNative(root)
-  maybeRefreshExternalTree()
-
-  const displayPids = externalPidsCache.length > 0 ? externalPidsCache : [root]
-  pruneExternalExcludedToTree(displayPids)
-
-  const nativeMem = readExternalProcessMemoryNativeSync(displayPids)
-  const timesIo = batchGetProcessTimesAndIoSync(displayPids)
+/** 在已有子树缓存与内存/TimesIo Map 上组装外部 MemorySnapshot（主线程轻量）。 */
+function composeExternalSnapshot(
+  timestamp: number,
+  root: number,
+  displayPids: number[],
+  nativeMem: Map<number, ExternalNativeMemoryRow>,
+  timesIo: Map<number, ProcessTimesIoRow>,
+): MemorySnapshot {
   const rates = computeExternalProcessRates(displayPids, timestamp, timesIo)
   const gpuSnap = queryGpuSystemSnapshotCached(displayPids)
 
@@ -587,7 +593,6 @@ function buildSnapshotExternal(): MemorySnapshot {
     .filter((p) => includedPids.includes(p.pid))
     .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
 
-  /** 顶部 CPU/磁盘卡片：子树内全部 PID 之和（与列表各行相加一致）；内存「进程树合计」仍只用 includedPids */
   let aggregateCpuPercent = 0
   let diskReadKBps = 0
   let diskWriteKBps = 0
@@ -636,9 +641,66 @@ function buildSnapshotExternal(): MemorySnapshot {
   }
 }
 
+/** 同步路径：整拍在主线程完成（IPC 即时刷新等短操作仍可用）。 */
+function buildSnapshotExternalSync(): MemorySnapshot {
+  const timestamp = Date.now()
+  const root = monitoredRootPid!
+  syncExternalProcessTreeFromNative(root)
+  maybeRefreshExternalTree()
+
+  const displayPids = externalPidsCache.length > 0 ? externalPidsCache : [root]
+  pruneExternalExcludedToTree(displayPids)
+
+  const nativeMem = readExternalProcessMemoryNativeSync(displayPids)
+  const timesIo = batchGetProcessTimesAndIoSync(displayPids)
+  return composeExternalSnapshot(timestamp, root, displayPids, nativeMem, timesIo)
+}
+
+/** 定时采集路径：子树 + 内存 + Times/IO 在 Native AsyncWorker 中执行，避免主线程长时间「未响应」。 */
+async function buildSnapshotExternalAsync(): Promise<MemorySnapshot> {
+  const timestamp = Date.now()
+  const root = monitoredRootPid!
+  const gathered: ExternalGatheredSnapshotPayload | null = await gatherExternalMonitorSnapshotAsync(root)
+
+  if (gathered && gathered.tree.length > 0) {
+    applyExternalStateFromTreeRows(root, gathered.tree)
+  } else {
+    syncExternalProcessTreeFromNative(root)
+  }
+  maybeRefreshExternalTree()
+
+  const displayPids = externalPidsCache.length > 0 ? externalPidsCache : [root]
+  pruneExternalExcludedToTree(displayPids)
+
+  let nativeMem: Map<number, ExternalNativeMemoryRow>
+  let timesIo: Map<number, ProcessTimesIoRow>
+  if (
+    gathered &&
+    gathered.tree.length > 0 &&
+    gathered.memory.size > 0 &&
+    displayPids.length > 0 &&
+    displayPids.every((pid) => gathered.memory.has(pid) && gathered.timesIo.has(pid))
+  ) {
+    nativeMem = gathered.memory
+    timesIo = gathered.timesIo
+  } else {
+    nativeMem = readExternalProcessMemoryNativeSync(displayPids)
+    timesIo = batchGetProcessTimesAndIoSync(displayPids)
+  }
+
+  return composeExternalSnapshot(timestamp, root, displayPids, nativeMem, timesIo)
+}
+
+async function buildSnapshotAsync(): Promise<MemorySnapshot> {
+  if (process.platform === 'win32' && monitoredRootPid != null && isNativeMemoryLoaded()) {
+    return buildSnapshotExternalAsync()
+  }
+  return buildSnapshotSelf()
+}
+
 function buildSnapshot(): MemorySnapshot {
   if (process.platform === 'win32' && monitoredRootPid != null && isNativeMemoryLoaded()) {
-    return buildSnapshotExternal()
+    return buildSnapshotExternalSync()
   }
   return buildSnapshotSelf()
 }
@@ -1098,30 +1160,42 @@ function compareReports(base: ReportSummary, target: ReportSummary): CompareResu
 
 // ============ 采集控制 ============
 
+function enqueueCollectTick(): void {
+  collectTickChain = collectTickChain
+    .then(() => runCollectTickBody())
+    .catch((err) => {
+      console.error('[MonitorTool] collect tick failed:', err)
+    })
+}
+
+async function runCollectTickBody(): Promise<void> {
+  const now = Date.now()
+  const driftMs = lastCollectScheduledAt ? now - lastCollectScheduledAt - CONFIG.collectInterval : 0
+  lastCollectScheduledAt = now
+  const b0 = Date.now()
+  const snapshot = await buildSnapshotAsync()
+  const buildMs = Date.now() - b0
+  perfChainMain('collect_tick', {
+    driftMs,
+    buildMs,
+    seq: snapshot.seq,
+    monitorMode: snapshot.monitorMode ?? 'self',
+    procCount: snapshot.processes.length,
+  })
+  pushSnapshot(snapshot)
+}
+
 function startCollecting(): void {
   if (collectTimer) return
 
   initPrivateWsRefreshInterval()
 
-  // 立即采集一次
+  // 立即采集一次（外部模式走异步 gather，避免首帧卡死 UI）
   lastCollectScheduledAt = Date.now()
-  pushSnapshot(buildSnapshot())
+  enqueueCollectTick()
 
   collectTimer = setInterval(() => {
-    const now = Date.now()
-    const driftMs = lastCollectScheduledAt ? now - lastCollectScheduledAt - CONFIG.collectInterval : 0
-    lastCollectScheduledAt = now
-    const b0 = Date.now()
-    const snapshot = buildSnapshot()
-    const buildMs = Date.now() - b0
-    perfChainMain('collect_tick', {
-      driftMs,
-      buildMs,
-      seq: snapshot.seq,
-      monitorMode: snapshot.monitorMode ?? 'self',
-      procCount: snapshot.processes.length,
-    })
-    pushSnapshot(snapshot)
+    enqueueCollectTick()
   }, CONFIG.collectInterval)
 
   console.log('[MonitorTool] Collection started, interval:', CONFIG.collectInterval, 'ms')
@@ -1449,11 +1523,13 @@ function registerIpcHandlers(): void {
     if (excluded) externalTotalExcludedPids.add(id)
     else externalTotalExcludedPids.delete(id)
     if (process.platform === 'win32' && monitoredRootPid != null && isNativeMemoryLoaded()) {
-      try {
-        pushSnapshot(buildSnapshot())
-      } catch (err) {
-        console.error('[MonitorTool] 排除设置后刷新快照失败:', err)
-      }
+      void buildSnapshotExternalAsync()
+        .then((snapshot) => {
+          pushSnapshot(snapshot)
+        })
+        .catch((err) => {
+          console.error('[MonitorTool] 排除设置后刷新快照失败:', err)
+        })
     }
     return true
   })
@@ -1461,11 +1537,13 @@ function registerIpcHandlers(): void {
   ipcMain.handle('external:reset-total-exclusion', (): boolean => {
     externalTotalExcludedPids.clear()
     if (process.platform === 'win32' && monitoredRootPid != null && isNativeMemoryLoaded()) {
-      try {
-        pushSnapshot(buildSnapshot())
-      } catch (err) {
-        console.error('[MonitorTool] 重置排除后刷新快照失败:', err)
-      }
+      void buildSnapshotExternalAsync()
+        .then((snapshot) => {
+          pushSnapshot(snapshot)
+        })
+        .catch((err) => {
+          console.error('[MonitorTool] 重置排除后刷新快照失败:', err)
+        })
     }
     return true
   })

@@ -6,7 +6,7 @@ apps/**/dist
 apps/**/dist-electron
 release
 release2
-
+release3
 # Keep SDK dist (pre-built for demo apps)
 # packages/electron-memory-monitor/dist is committed intentionally
 

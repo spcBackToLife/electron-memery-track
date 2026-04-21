@@ -13,7 +13,7 @@
     "appId": "com.benchmark.bare-minimum",
     "productName": "BareMinimum",
     "directories": {
-      "output": "release2"
+      "output": "release3"
     },
     "files": ["dist/**/*", "dist-electron/**/*"],
     "win": {

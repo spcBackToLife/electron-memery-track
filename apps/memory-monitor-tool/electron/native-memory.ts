@@ -22,6 +22,7 @@ interface NativeMemoryModule {
   batchGetProcessMemory(pids: number[]): Record<string, unknown>
   /** Windows：Toolhelp32 + QueryFullProcessImageName + NtQueryInformationProcess */
   enumerateProcessTree?(rootPid: number): unknown
+  gatherExternalMonitorSnapshotAsync?(rootPid: number): Promise<unknown>
   /** Windows：GetProcessTimes + GetProcessIoCounters（原始累计值，主进程算间隔） */
   batchGetProcessTimesAndIo?(pids: number[]): Record<string, unknown>
   /** Windows：PDH 异步采样 GPU（可选子树 PID 过滤） */
@@ -177,6 +178,13 @@ export interface NativeProcessTreeRow {
   commandLine: string
 }
 
+/** gatherExternalMonitorSnapshotAsync 解析后的结果（与主进程 assemble 外部快照一致） */
+export interface ExternalGatheredSnapshotPayload {
+  tree: NativeProcessTreeRow[]
+  memory: Map<number, ExternalNativeMemoryRow>
+  timesIo: Map<number, ProcessTimesIoRow>
+}
+
 /**
  * 仅保留「从该 PID 沿父链能走回到 rootPid」的节点（含根）。
  * 旧版 .node 无 parentPid 时原样返回。
@@ -249,6 +257,106 @@ export function enumerateProcessTreeNativeSync(rootPid: number): NativeProcessTr
     return filtered.length > 0 ? filtered : null
   } catch (e) {
     console.warn('[MonitorTool] enumerateProcessTreeNativeSync failed:', e)
+    return null
+  }
+}
+
+/**
+ * 在 Native AsyncWorker（libuv 线程池）中完成子树枚举 + 每 PID 内存与 Times/IO，避免阻塞主线程。
+ * 旧版 .node 无导出时返回 null。
+ */
+export async function gatherExternalMonitorSnapshotAsync(
+  rootPid: number,
+): Promise<ExternalGatheredSnapshotPayload | null> {
+  const mod = nativeModule
+  if (!mod || !IS_WINDOWS || !Number.isFinite(rootPid) || rootPid <= 0) return null
+  if (typeof mod.gatherExternalMonitorSnapshotAsync !== 'function') return null
+  try {
+    const raw = await mod.gatherExternalMonitorSnapshotAsync(Math.floor(rootPid))
+    if (raw == null || typeof raw !== 'object') return null
+    const root = raw as Record<string, unknown>
+    const treeRaw = root.tree
+    if (!Array.isArray(treeRaw) || treeRaw.length === 0) return null
+
+    const tree: NativeProcessTreeRow[] = []
+    for (const item of treeRaw) {
+      if (item == null || typeof item !== 'object') continue
+      const o = item as Record<string, unknown>
+      const pid = typeof o.pid === 'number' ? o.pid : Number(o.pid)
+      if (!Number.isFinite(pid) || pid <= 0) continue
+      const ppRaw = o.parentPid
+      const parentPid =
+        typeof ppRaw === 'number'
+          ? Math.floor(ppRaw)
+          : typeof ppRaw === 'string' && ppRaw.trim() !== ''
+            ? Math.floor(Number(ppRaw))
+            : undefined
+      tree.push({
+        pid: Math.floor(pid),
+        parentPid: typeof parentPid === 'number' && Number.isFinite(parentPid) && parentPid >= 0 ? parentPid : undefined,
+        name: typeof o.name === 'string' ? o.name : '',
+        exePath: typeof o.exePath === 'string' ? o.exePath : '',
+        commandLine: typeof o.commandLine === 'string' ? o.commandLine : '',
+      })
+    }
+    if (tree.length === 0) return null
+
+    const rootNorm = Math.floor(rootPid)
+    const treeFiltered = filterProcessTreeRowsStrictDescendants(rootNorm, tree)
+    const treeOut = treeFiltered.length > 0 ? treeFiltered : tree
+
+    const memoryAll = new Map<number, ExternalNativeMemoryRow>()
+    const memObj = root.memory
+    if (memObj && typeof memObj === 'object') {
+      for (const [pidStr, v] of Object.entries(memObj as Record<string, unknown>)) {
+        const pid = parseInt(pidStr, 10)
+        if (Number.isNaN(pid)) continue
+        if (v == null || typeof v !== 'object') continue
+        const m = v as Record<string, unknown>
+        const privKb = Number(m.privateKb)
+        const wsKb = Number(m.workingSetKb)
+        const peakKb = Number(m.peakKb)
+        memoryAll.set(pid, {
+          privateKb: Number.isFinite(privKb) ? privKb : 0,
+          workingSetKb: Number.isFinite(wsKb) ? wsKb : 0,
+          peakKb: Number.isFinite(peakKb) ? peakKb : Number.isFinite(wsKb) ? wsKb : 0,
+        })
+      }
+    }
+
+    const timesIoAll = new Map<number, ProcessTimesIoRow>()
+    const tObj = root.timesIo
+    if (tObj && typeof tObj === 'object') {
+      for (const [pidStr, row] of Object.entries(tObj as Record<string, unknown>)) {
+        const pid = parseInt(pidStr, 10)
+        if (Number.isNaN(pid) || row == null || typeof row !== 'object') continue
+        const r = row as Record<string, unknown>
+        const u = Number(r.userTime100ns)
+        const k = Number(r.kernelTime100ns)
+        const rb = Number(r.readBytes)
+        const wb = Number(r.writeBytes)
+        if (!Number.isFinite(u) || !Number.isFinite(k)) continue
+        timesIoAll.set(pid, {
+          userTime100ns: u,
+          kernelTime100ns: k,
+          readBytes: Number.isFinite(rb) ? rb : 0,
+          writeBytes: Number.isFinite(wb) ? wb : 0,
+        })
+      }
+    }
+
+    const memory = new Map<number, ExternalNativeMemoryRow>()
+    const timesIo = new Map<number, ProcessTimesIoRow>()
+    for (const r of treeOut) {
+      const mem = memoryAll.get(r.pid)
+      if (mem) memory.set(r.pid, mem)
+      const t = timesIoAll.get(r.pid)
+      if (t) timesIo.set(r.pid, t)
+    }
+
+    return { tree: treeOut, memory, timesIo }
+  } catch (e) {
+    console.warn('[MonitorTool] gatherExternalMonitorSnapshotAsync failed:', e)
     return null
   }
 }
