@@ -45,6 +45,55 @@ const getTypeColor = (type: string): string => {
   }
 }
 
+/** Chromium --type= 简短中文，与任务管理器命令行一致 */
+const chromiumTypeLabel = (raw: string): string => {
+  const t = raw.split(':')[0]?.toLowerCase() ?? raw.toLowerCase()
+  if (t === 'gpu-process') return 'GPU'
+  if (t === 'renderer') return '渲染'
+  if (t === 'browser') return '浏览器'
+  if (t === 'utility') return 'Utility'
+  if (t === 'crashpad-handler') return 'Crashpad'
+  if (t === 'zygote') return 'Zygote'
+  return raw.length > 20 ? `${raw.slice(0, 18)}…` : raw
+}
+
+const chromiumTypeBadgeColor = (raw: string): string => {
+  const t = raw.split(':')[0]?.toLowerCase() ?? ''
+  if (t === 'gpu-process') return getTypeColor('GPU')
+  if (t === 'renderer') return getTypeColor('Tab')
+  if (t === 'browser') return getTypeColor('Browser')
+  if (t === 'utility') return '#8b6ec8'
+  if (t === 'crashpad-handler') return '#5c5c5c'
+  if (t === 'zygote') return '#4a7a8f'
+  return '#888'
+}
+
+/** 外部监控：徽章直接展示 Chromium 角色；完整命令行放在 title */
+const externalTypeBadge = (
+  proc: ProcessMemoryInfo,
+): { label: string; color: string; title?: string } => {
+  if (proc.type === 'Browser') {
+    return { label: '主进程', color: getTypeColor('Browser'), title: proc.chromiumType }
+  }
+  if (proc.chromiumType) {
+    return {
+      label: chromiumTypeLabel(proc.chromiumType),
+      color: chromiumTypeBadgeColor(proc.chromiumType),
+      title: proc.chromiumType,
+    }
+  }
+  if (proc.type === 'GPU') {
+    return { label: 'GPU', color: getTypeColor('GPU') }
+  }
+  if (proc.type === 'Utility') {
+    return { label: '辅助进程', color: '#8b6ec8' }
+  }
+  if (proc.type === 'Zygote') {
+    return { label: 'Zygote', color: chromiumTypeBadgeColor('zygote') }
+  }
+  return { label: '子进程', color: getTypeColor('Tab') }
+}
+
 /**
  * 进程表格 - 简化版，去掉 V8 相关列，只关注进程级内存
  */
@@ -54,8 +103,9 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
   externalTotalIncludedPids,
   onTogglePidInTotal,
 }) => {
-  const sorted = [...processes].sort(
-    (a, b) => getEffectiveMemoryKB(b.memory) - getEffectiveMemoryKB(a.memory),
+  const sorted = useMemo(
+    () => [...processes].sort((a, b) => getEffectiveMemoryKB(b.memory) - getEffectiveMemoryKB(a.memory)),
+    [processes],
   )
 
   const includedSet = useMemo(() => {
@@ -76,18 +126,34 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
               <th title="未勾选的进程仍显示内存，但不计入上方「进程树合计」">计入合计</th>
             ) : null}
             <th>PID</th>
-            <th>类型</th>
+            <th title={externalMonitor ? '主进程为树根；其余为子进程。能读到命令行时徽章显示 --type= 角色（悬停可看原始片段）' : undefined}>
+              类型
+            </th>
             <th>{externalMonitor ? '进程名' : '名称'}</th>
             <th title="优先专用工作集（系统 API / Native），未就绪时回退工作集">内存</th>
             <th title="Electron 上报的峰值工作集">峰值</th>
             <th>CPU</th>
+            {externalMonitor ? (
+              <>
+                <th title="相对上一拍采样间隔的读速率">读 KB/s</th>
+                <th title="相对上一拍采样间隔的写速率">写 KB/s</th>
+              </>
+            ) : null}
           </tr>
         </thead>
         <tbody>
           {sorted.map((proc) => {
             const inTotal = !includedSet || includedSet.has(proc.pid)
+            const typeBadge: { label: string; color: string; title?: string } = externalMonitor
+              ? externalTypeBadge(proc)
+              : { label: getTypeName(proc.type, false), color: getTypeColor(proc.type) }
             return (
-              <tr key={proc.pid} className={showTotalColumn && !inTotal ? 'row-excluded-from-total' : undefined}>
+              <tr
+                key={proc.pid}
+                className={['mmt-process-table-row', showTotalColumn && !inTotal ? 'row-excluded-from-total' : '']
+                  .filter(Boolean)
+                  .join(' ')}
+              >
                 {showTotalColumn ? (
                   <td className="mmt-col-include-total">
                     <input
@@ -102,18 +168,25 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
                   </td>
                 ) : null}
                 <td>{proc.pid}</td>
-                <td>
+                <td className="mmt-type-cell">
                   <span
                     className="mmt-type-badge"
-                    style={{ backgroundColor: getTypeColor(proc.type) }}
+                    style={{ backgroundColor: typeBadge.color }}
+                    title={typeBadge.title}
                   >
-                    {getTypeName(proc.type, externalMonitor)}
+                    {typeBadge.label}
                   </span>
                 </td>
                 <td className="proc-name">{proc.name || (externalMonitor ? `PID ${proc.pid}` : '-')}</td>
                 <td className="mem-value">{formatKB(getEffectiveMemoryKB(proc.memory))}</td>
                 <td className="mem-value">{formatKB(proc.memory.peakWorkingSetSize)}</td>
                 <td className="cpu-value">{proc.cpu.percentCPUUsage.toFixed(1)}%</td>
+                {externalMonitor ? (
+                  <>
+                    <td className="cpu-value">{(proc.diskReadKBps ?? 0).toFixed(1)}</td>
+                    <td className="cpu-value">{(proc.diskWriteKBps ?? 0).toFixed(1)}</td>
+                  </>
+                ) : null}
               </tr>
             )
           })}

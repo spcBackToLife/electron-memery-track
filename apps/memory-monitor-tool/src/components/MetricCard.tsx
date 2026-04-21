@@ -4,6 +4,8 @@ interface MetricCardProps {
   title: string
   value: string
   unit?: string
+  /** 本会话内高/低/均等补充说明（多行） */
+  detail?: string
   trend?: 'up' | 'down' | 'stable'
   trendValue?: string
   color?: string
@@ -14,6 +16,7 @@ const MetricCard: React.FC<MetricCardProps> = ({
   title,
   value,
   unit,
+  detail,
   trend,
   trendValue,
   color = '#646cff',
@@ -32,6 +35,7 @@ const MetricCard: React.FC<MetricCardProps> = ({
         <span className="mmt-metric-number">{value}</span>
         {unit && <span className="mmt-metric-unit">{unit}</span>}
       </div>
+      {detail ? <div className="mmt-metric-detail">{detail}</div> : null}
       {trend && trendValue && (
         <div className="mmt-metric-trend" style={{ color: trendColor }}>
           <span>{trendIcon}</span>

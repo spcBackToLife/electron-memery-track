@@ -304,6 +304,139 @@ body {
   margin-top: 6px;
 }
 
+.mmt-metric-detail {
+  font-size: 11px;
+  color: @text-muted;
+  margin-top: 8px;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+
+.mmt-metric-cards-row-external {
+  margin-top: 2px;
+}
+
+.external-perf-charts {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid @border-color;
+}
+
+.mmt-resource-section .external-perf-charts {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+.external-perf-charts--featured .external-perf-charts-title {
+  display: none;
+}
+
+.external-perf-charts-title {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: @text-primary;
+}
+
+.external-perf-chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 6px;
+  width: 100%;
+  min-width: 0;
+
+  @media (max-width: 720px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.external-perf-chart-grid--featured {
+  gap: 14px;
+  margin-top: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.mmt-resource-section {
+  background: @bg-secondary;
+  border-radius: 10px;
+  padding: 16px;
+  border: 1px solid @border-color;
+  margin-bottom: 16px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.mmt-resource-section-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+  color: @text-primary;
+}
+
+.mmt-self-monitor-hint {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 8px;
+  border: 1px dashed @border-color;
+}
+
+.external-perf-cell {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  padding: 6px 8px 2px;
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.external-perf-cell-label {
+  display: block;
+  font-size: 11px;
+  color: @text-secondary;
+  margin-bottom: 2px;
+}
+
+.external-perf-cell--featured .external-perf-cell-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.compare-resource-charts {
+  margin-top: 18px;
+}
+
+.compare-resource-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px;
+  margin-top: 10px;
+
+  @media (max-width: 960px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.compare-resource-cell {
+  background: rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  padding: 8px 10px 4px;
+  border: 1px solid @border-color;
+}
+
+.compare-resource-cell-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: @text-secondary;
+  margin-bottom: 4px;
+}
+
 // Charts Row
 .charts-row {
   display: grid;
@@ -440,6 +573,10 @@ body {
   font-size: 11px;
   color: #fff;
   white-space: nowrap;
+}
+
+.mmt-type-cell {
+  vertical-align: middle;
 }
 
 .proc-name { max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -619,6 +756,12 @@ body {
 
 // Summary Grid
 .report-summary { margin-top: 20px; }
+.report-summary--resource {
+  margin-top: 22px;
+  .summary-grid {
+    grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+  }
+}
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

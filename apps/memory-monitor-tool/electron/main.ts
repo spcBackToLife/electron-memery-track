@@ -14,9 +14,18 @@ import {
   createPrivateWsProvider,
   getNativeModuleStatus,
   readExternalProcessMemoryNativeSync,
+  enumerateProcessTreeNativeSync,
   isNativeMemoryLoaded,
+  batchGetProcessTimesAndIoSync,
+  type ProcessTimesIoRow,
 } from './native-memory'
 import { fetchWindowsProcessTree } from './external-process-tree'
+import { queryGpuSystemSnapshotCached } from './external-gpu-metrics'
+import { perfChainMain, writeDiagNdjson, getDiagLogPath } from './diag-log'
+import {
+  computeResourceSummaryFromDataPoints,
+  type ResourceSummaryPayload,
+} from '../src/utils/reportResourceSummary'
 
 const __dirname_electron = path.dirname(__filename)
 const RENDERER_DIST = path.join(__dirname_electron, '../dist')
@@ -32,7 +41,12 @@ interface ProcessMemoryInfo {
   executablePath?: string
   /** 外部模式：Win32_Process.CommandLine */
   commandLine?: string
+  /** 外部模式：--type= / utility-sub-type 摘要，供 UI 在去掉 commandLine 后仍显示角色 */
+  chromiumType?: string
   cpu: { percentCPUUsage: number; idleWakeupsPerSecond: number }
+  /** 外部模式：相对上一拍采样的磁盘速率（KB/s） */
+  diskReadKBps?: number
+  diskWriteKBps?: number
   memory: {
     workingSetSize: number
     peakWorkingSetSize: number
@@ -60,6 +74,17 @@ interface MemorySnapshot {
   externalRootPid?: number
   /** 外部模式：参与 totalWorkingSetSize 汇总的 PID（未列出的即用户从合计中排除） */
   externalTotalIncludedPids?: number[]
+  /**
+   * 外部模式：CPU/磁盘为子树全部 PID 速率之和；GPU 为子树 PID 过滤的 PDH 采样。
+   * 首拍无上一采样则 CPU/磁盘为 0；GPU 可能因环境无计数器而为 null。
+   */
+  externalMetrics?: {
+    aggregateCpuPercent: number
+    diskReadKBps: number
+    diskWriteKBps: number
+    gpuEnginePercent: number | null
+    gpuDedicatedMB: number | null
+  }
 }
 
 interface EventMark {
@@ -104,6 +129,8 @@ let pendingMarks: EventMark[] = []
 
 /** 定时采集器 */
 let collectTimer: ReturnType<typeof setInterval> | null = null
+/** 用于 MMT_PERF_CHAIN 观察 setInterval 是否漂移（GC/同步磁盘阻塞） */
+let lastCollectScheduledAt = 0
 
 /** 存储目录 */
 let storageDir: string
@@ -132,6 +159,12 @@ let externalTotalExcludedPids: Set<number> = new Set()
 let externalTreeLastRefresh = 0
 const EXTERNAL_TREE_REFRESH_MS = 2500
 
+/** 外部进程 CPU/磁盘：上一拍累计值（与当前拍算速率） */
+let lastExternalPerfSample: {
+  t: number
+  map: Map<number, { user: number; kernel: number; read: number; write: number }>
+} | null = null
+
 // ============ 配置 ============
 
 const CONFIG = {
@@ -140,10 +173,10 @@ const CONFIG = {
   maxSessions: 100,
   maxSessionDuration: 24 * 60 * 60 * 1000, // 24h
   /**
-   * 外部监控：WMI 父子链可能挂入无关进程（如 upgrade.exe）。
-   * 为 true 时仅保留与「启动 exe」路径/命令行明显相关的 PID（根进程始终保留）。
+   * 外部监控：为 true 时按启动 exe / 命令行筛掉子树里镜像不同的 PID（会去掉 upgrade 等，一般不推荐）。
+   * 为 false 时列表 = 根 PID 的 PPID 子树；「多出来又消失」多为旧缓存 + PID 复用，已由每拍 sync enumerate 缓解。
    */
-  externalSameAppTreeFilter: true,
+  externalSameAppTreeFilter: false,
 }
 
 /** 专用工作集（Native C++ / PowerShell）查询与缓存，与 SDK MemoryCollector 策略一致 */
@@ -178,6 +211,9 @@ function maybeRefreshPrivateWs(pids: number[]): void {
 
 function maybeRefreshExternalTree(): void {
   if (process.platform !== 'win32' || monitoredRootPid == null) return
+  // 已加载 Native 时子树在 buildSnapshotExternal 开头每拍同步 enumerate，此处再跑异步会与当前拍竞态且徒增开销
+  if (isNativeMemoryLoaded()) return
+
   const now = Date.now()
   if (now - externalTreeLastRefresh < EXTERNAL_TREE_REFRESH_MS) return
   externalTreeLastRefresh = now
@@ -196,6 +232,61 @@ function clearExternalMonitorState(): void {
   externalCommandLineCache = new Map()
   externalTotalExcludedPids = new Set()
   externalTreeLastRefresh = 0
+  lastExternalPerfSample = null
+}
+
+/** 根据两拍 GetProcessTimes / GetProcessIoCounters 差分得到 CPU% 与磁盘 KB/s */
+function computeExternalProcessRates(
+  pids: number[],
+  now: number,
+  current: Map<number, ProcessTimesIoRow>,
+): Map<number, { cpuPct: number; readKBps: number; writeKBps: number }> {
+  const out = new Map<number, { cpuPct: number; readKBps: number; writeKBps: number }>()
+  const curMap = new Map<number, { user: number; kernel: number; read: number; write: number }>()
+  for (const pid of pids) {
+    const r = current.get(pid)
+    if (r) {
+      curMap.set(pid, {
+        user: r.userTime100ns,
+        kernel: r.kernelTime100ns,
+        read: r.readBytes,
+        write: r.writeBytes,
+      })
+    } else {
+      curMap.set(pid, { user: 0, kernel: 0, read: 0, write: 0 })
+    }
+  }
+
+  if (!lastExternalPerfSample) {
+    lastExternalPerfSample = { t: now, map: curMap }
+    for (const pid of pids) out.set(pid, { cpuPct: 0, readKBps: 0, writeKBps: 0 })
+    return out
+  }
+
+  const dtMs = Math.max(1, now - lastExternalPerfSample.t)
+  const dt100ns = dtMs * 10000
+
+  for (const pid of pids) {
+    const prev = lastExternalPerfSample.map.get(pid)
+    const cur = curMap.get(pid)
+    if (!prev || !cur) {
+      out.set(pid, { cpuPct: 0, readKBps: 0, writeKBps: 0 })
+      continue
+    }
+    const procDelta = Math.max(0, cur.user - prev.user) + Math.max(0, cur.kernel - prev.kernel)
+    /** 与多核任务管理器类似：单进程可接近 100% 表示吃满约一颗逻辑核；多进程合计可超过 100% */
+    const cpuPct = (100 * procDelta) / dt100ns
+    const readBps = (Math.max(0, cur.read - prev.read) / dtMs) * 1000
+    const writeBps = (Math.max(0, cur.write - prev.write) / dtMs) * 1000
+    out.set(pid, {
+      cpuPct: Math.round(cpuPct * 1000) / 1000,
+      readKBps: Math.round((readBps / 1024) * 100) / 100,
+      writeKBps: Math.round((writeBps / 1024) * 100) / 100,
+    })
+  }
+
+  lastExternalPerfSample = { t: now, map: curMap }
+  return out
 }
 
 /** 进程树刷新后：去掉已不在树中的排除项（新出现的 PID 默认仍计入合计） */
@@ -215,7 +306,7 @@ function pruneExternalExcludedToTree(displayPids: number[]): void {
  *
  * 刻意**不再**使用「仅同安装目录」规则，否则会误留同目录下的 upgrader.exe、downloader_hdiff.exe、TASLogin64.exe。
  *
- * 命令行来自 WMI（PowerShell 枚举），与 C++ 读取等价；若要在 native 里读可用 NtQueryInformationProcess(ProcessCommandLineInformation)，当前不必重复实现。
+ * 命令行由 Native（NtQueryInformationProcess ProcessCommandLineInformation）读取；不再使用 PowerShell/WMI 枚举子树。
  */
 function filterExternalPidsToSameApp(
   rawPids: number[],
@@ -263,6 +354,29 @@ function filterExternalPidsToSameApp(
 
     return false
   })
+}
+
+/**
+ * 每拍同步：用 Native 重枚举根 PID 子树并写回缓存。
+ * 避免「进程表 2.5s 才刷新」时仍保留已退出 PID；PID 复用后短暂把别的进程挂到旧行上，看起来像多出来又消失。
+ */
+function syncExternalProcessTreeFromNative(rootPid: number): void {
+  if (!isNativeMemoryLoaded()) return
+  const rows = enumerateProcessTreeNativeSync(rootPid)
+  if (rows == null || rows.length === 0) return
+
+  const pids: number[] = []
+  const names = new Map<number, string>()
+  const exePath = new Map<number, string>()
+  const commandLine = new Map<number, string>()
+  for (const r of rows) {
+    pids.push(r.pid)
+    names.set(r.pid, r.name.trim() ? r.name : `PID ${r.pid}`)
+    if (r.exePath.trim()) exePath.set(r.pid, r.exePath.trim())
+    if (r.commandLine.trim()) commandLine.set(r.pid, r.commandLine.trim())
+  }
+  applyExternalTreeFetchResult(rootPid, pids, names, exePath, commandLine)
+  externalTreeLastRefresh = Date.now()
 }
 
 function applyExternalTreeFetchResult(
@@ -409,15 +523,37 @@ function buildSnapshotSelf(): MemorySnapshot {
   }
 }
 
+/** 从完整命令行提取 Chromium/CEF 的 --type=（及 utility 子类型），供 IPC 瘦身列仍展示角色 */
+function parseChromiumProcessRole(cmd: string | undefined): string | undefined {
+  if (cmd == null || typeof cmd !== 'string') return undefined
+  const trimmed = cmd.trim()
+  if (!trimmed) return undefined
+  const typeM = trimmed.match(/--type=([^\s"']+)/i)
+  if (!typeM || !typeM[1]) return undefined
+  const raw = typeM[1]
+  const t = raw.toLowerCase()
+  if (t === 'utility') {
+    const subM = trimmed.match(/--utility-sub-type=([^\s"']+)/i)
+    const sub = subM && subM[1] ? subM[1] : ''
+    const combo = sub ? `utility:${sub}` : 'utility'
+    return combo.length > 96 ? `${combo.slice(0, 93)}...` : combo
+  }
+  return raw.length > 64 ? `${raw.slice(0, 61)}...` : raw
+}
+
 function buildSnapshotExternal(): MemorySnapshot {
   const timestamp = Date.now()
   const root = monitoredRootPid!
+  syncExternalProcessTreeFromNative(root)
   maybeRefreshExternalTree()
 
   const displayPids = externalPidsCache.length > 0 ? externalPidsCache : [root]
   pruneExternalExcludedToTree(displayPids)
 
   const nativeMem = readExternalProcessMemoryNativeSync(displayPids)
+  const timesIo = batchGetProcessTimesAndIoSync(displayPids)
+  const rates = computeExternalProcessRates(displayPids, timestamp, timesIo)
+  const gpuSnap = queryGpuSystemSnapshotCached(displayPids)
 
   const processes: ProcessMemoryInfo[] = displayPids.map((pid) => {
     const row = nativeMem.get(pid)
@@ -427,13 +563,17 @@ function buildSnapshotExternal(): MemorySnapshot {
     const isRoot = pid === root
     const exe = externalExePathCache.get(pid)
     const cmd = externalCommandLineCache.get(pid)
+    const r = rates.get(pid)
     return {
       pid,
       type: (isRoot ? 'Browser' : 'Tab') as ProcessMemoryInfo['type'],
       name: externalNamesCache.get(pid),
       executablePath: exe,
       commandLine: cmd,
-      cpu: { percentCPUUsage: 0, idleWakeupsPerSecond: 0 },
+      chromiumType: parseChromiumProcessRole(cmd),
+      cpu: { percentCPUUsage: r?.cpuPct ?? 0, idleWakeupsPerSecond: 0 },
+      diskReadKBps: r?.readKBps ?? 0,
+      diskWriteKBps: r?.writeKBps ?? 0,
       memory: {
         workingSetSize: wsKb,
         peakWorkingSetSize: peakKb,
@@ -446,6 +586,22 @@ function buildSnapshotExternal(): MemorySnapshot {
   const totalWorkingSetSize = processes
     .filter((p) => includedPids.includes(p.pid))
     .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
+
+  /** 顶部 CPU/磁盘卡片：子树内全部 PID 之和（与列表各行相加一致）；内存「进程树合计」仍只用 includedPids */
+  let aggregateCpuPercent = 0
+  let diskReadKBps = 0
+  let diskWriteKBps = 0
+  for (const pid of displayPids) {
+    const r = rates.get(pid)
+    if (r) {
+      aggregateCpuPercent += r.cpuPct
+      diskReadKBps += r.readKBps
+      diskWriteKBps += r.writeKBps
+    }
+  }
+  aggregateCpuPercent = Math.round(aggregateCpuPercent * 100) / 100
+  diskReadKBps = Math.round(diskReadKBps * 100) / 100
+  diskWriteKBps = Math.round(diskWriteKBps * 100) / 100
 
   const systemTotal = os.totalmem()
   const systemFree = os.freemem()
@@ -470,6 +626,13 @@ function buildSnapshotExternal(): MemorySnapshot {
     externalTargetPath: targetAppInfo?.appPath,
     externalRootPid: root,
     externalTotalIncludedPids: [...includedPids].sort((a, b) => a - b),
+    externalMetrics: {
+      aggregateCpuPercent,
+      diskReadKBps,
+      diskWriteKBps,
+      gpuEnginePercent: gpuSnap.engineUtilPercent,
+      gpuDedicatedMB: gpuSnap.dedicatedUsedMB,
+    },
   }
 }
 
@@ -550,6 +713,7 @@ function startSession(label: string, description?: string): TestSession {
 
   broadcastToRenderer('session:started', session)
 
+  perfChainMain('startSession', { sessionId: session.id, label })
   console.log(`[MonitorTool] Session started: ${label} (${session.id})`)
   return session
 }
@@ -668,6 +832,12 @@ interface ReportSummary {
     rendererMB: number
     gpuMB: number
     processCount: number
+    /** 外部模式：子树 CPU/磁盘 KB/s、子树 PID 过滤 GPU（与快照 externalMetrics 一致） */
+    extCpuPercent?: number
+    extDiskReadKBps?: number
+    extDiskWriteKBps?: number
+    extGpuEnginePercent?: number | null
+    extGpuDedicatedMB?: number | null
   }>
 
   /** 外部监控：进程树合计所依据的 PID 及名称（取会话结束时最后一次采样） */
@@ -678,6 +848,8 @@ interface ReportSummary {
   }
 
   eventMarks?: ReportEventMarkRow[]
+
+  resourceSummary?: ResourceSummaryPayload
 }
 
 function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]): ReportSummary {
@@ -726,7 +898,7 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
     peakRenderer = Math.max(peakRenderer, rendererMem)
     peakProcCount = Math.max(peakProcCount, s.processes.length)
 
-    return {
+    const pt: ReportSummary['dataPoints'][number] = {
       timestamp: s.timestamp,
       totalMB,
       browserMB,
@@ -734,6 +906,14 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
       gpuMB,
       processCount: s.processes.length,
     }
+    if (s.monitorMode === 'external' && s.externalMetrics) {
+      pt.extCpuPercent = s.externalMetrics.aggregateCpuPercent
+      pt.extDiskReadKBps = s.externalMetrics.diskReadKBps
+      pt.extDiskWriteKBps = s.externalMetrics.diskWriteKBps
+      pt.extGpuEnginePercent = s.externalMetrics.gpuEnginePercent
+      pt.extGpuDedicatedMB = s.externalMetrics.gpuDedicatedMB
+    }
+    return pt
   })
 
   // 趋势分析
@@ -767,6 +947,8 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
     conclusion = 'PASS'
     reason = '内存使用稳定，无明显增长趋势。'
   }
+
+  const resourceSummary = computeResourceSummaryFromDataPoints(dataPoints)
 
   const lastSnap = snapshots[snapshots.length - 1]
   let externalTotalMemoryBasis: ReportSummary['externalTotalMemoryBasis']
@@ -815,6 +997,7 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
     dataPoints,
     eventMarks: collectReportEventMarks(snapshots),
     ...(externalTotalMemoryBasis ? { externalTotalMemoryBasis } : {}),
+    ...(resourceSummary ? { resourceSummary } : {}),
   }
 }
 
@@ -921,14 +1104,31 @@ function startCollecting(): void {
   initPrivateWsRefreshInterval()
 
   // 立即采集一次
+  lastCollectScheduledAt = Date.now()
   pushSnapshot(buildSnapshot())
 
   collectTimer = setInterval(() => {
+    const now = Date.now()
+    const driftMs = lastCollectScheduledAt ? now - lastCollectScheduledAt - CONFIG.collectInterval : 0
+    lastCollectScheduledAt = now
+    const b0 = Date.now()
     const snapshot = buildSnapshot()
+    const buildMs = Date.now() - b0
+    perfChainMain('collect_tick', {
+      driftMs,
+      buildMs,
+      seq: snapshot.seq,
+      monitorMode: snapshot.monitorMode ?? 'self',
+      procCount: snapshot.processes.length,
+    })
     pushSnapshot(snapshot)
   }, CONFIG.collectInterval)
 
   console.log('[MonitorTool] Collection started, interval:', CONFIG.collectInterval, 'ms')
+  perfChainMain('startCollecting', {
+    intervalMs: CONFIG.collectInterval,
+    note: '单一定时器；每 interval 仅 buildSnapshot 一次 + pushSnapshot',
+  })
 }
 
 function stopCollecting(): void {
@@ -939,23 +1139,53 @@ function stopCollecting(): void {
   console.log('[MonitorTool] Collection stopped')
 }
 
+/** 实时 UI 去掉超长 commandLine；保留 chromiumType 短字段便于展示 --type= 角色 */
+function slimSnapshotForUiBroadcast(full: MemorySnapshot): MemorySnapshot {
+  if (full.processes.length === 0) return full
+  return {
+    ...full,
+    processes: full.processes.map((p) => {
+      const { commandLine: _drop, ...rest } = p
+      return rest
+    }),
+  }
+}
+
 function pushSnapshot(snapshot: MemorySnapshot): void {
   // 缓存到缓冲区
   snapshotsBuffer.push(snapshot)
 
+  let diskWriteMs = 0
   // 如果有正在进行的会话，写入磁盘
   if (currentSession?.status === 'running') {
     const sessionDataFile = path.join(storageDir, currentSession.dataFile)
     try {
+      const d0 = Date.now()
       fs.appendFileSync(sessionDataFile, JSON.stringify(snapshot) + '\n', 'utf-8')
+      diskWriteMs = Date.now() - d0
       currentSession.snapshotCount++
     } catch (err) {
       console.error('[MonitorTool] Failed to write snapshot:', err)
     }
   }
 
-  // 推送到 UI（限制推送频率避免卡顿）
-  broadcastToRenderer('snapshot:update', snapshot)
+  const s0 = Date.now()
+  const slim = slimSnapshotForUiBroadcast(snapshot)
+  const slimMs = Date.now() - s0
+
+  // 推送到 UI：磁盘仍写完整快照，IPC 用瘦身副本（尤其外部子树 commandLine 极长时）
+  const send0 = Date.now()
+  broadcastToRenderer('snapshot:update', slim)
+  const ipcSendMs = Date.now() - send0
+
+  perfChainMain('pushSnapshot', {
+    seq: snapshot.seq,
+    diskWriteMs,
+    slimMs,
+    ipcSendMs,
+    procCount: snapshot.processes.length,
+    monitorMode: snapshot.monitorMode ?? 'self',
+  })
 
   // 限制缓冲区大小
   if (snapshotsBuffer.length > CONFIG.maxSnapshotsPerSession) {
@@ -973,6 +1203,7 @@ interface LaunchAppResult {
 }
 
 async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchAppResult> {
+  perfChainMain('launchTargetApp_begin', { appPath })
   try {
     const appName = path.basename(appPath).replace(/\.(exe|app|bat|sh)$/, '')
     targetAppInfo = {
@@ -1014,6 +1245,7 @@ async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchA
 
       privateWsCache = new Map()
       privateWsLastRefresh = 0
+      lastExternalPerfSample = null
       externalTotalExcludedPids = new Set()
       externalPidsCache = [childPid]
       externalNamesCache = new Map([[childPid, appName]])
@@ -1022,23 +1254,32 @@ async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchA
       externalTreeLastRefresh = 0
       if (isNativeMemoryLoaded()) {
         monitoredRootPid = childPid
+        syncExternalProcessTreeFromNative(childPid)
+        perfChainMain('launchTargetApp_tree_applied', {
+          rootPid: childPid,
+          pidCount: externalPidsCache.length,
+        })
       } else {
         monitoredRootPid = null
         console.warn(
           '[MonitorTool] memory_native.node 未加载，无法按 C++ 路径采集外部进程树内存。请在本应用目录执行 pnpm run build:with-native 编译 native 后再试。',
         )
       }
-      void fetchWindowsProcessTree(childPid).then((result) => {
-        applyExternalTreeFetchResult(childPid, result.pids, result.names, result.exePath, result.commandLine)
-      })
+      if (!isNativeMemoryLoaded()) {
+        void fetchWindowsProcessTree(childPid).then((result) => {
+          applyExternalTreeFetchResult(childPid, result.pids, result.names, result.exePath, result.commandLine)
+          perfChainMain('launchTargetApp_tree_applied', {
+            rootPid: childPid,
+            pidCount: result.pids.length,
+          })
+        })
+      }
 
       // 为本次「启动并监控」自动新开测试会话（会结束当前运行中的会话）
       const session = startSession(`启动: ${appName}`, `可执行文件: ${appPath}`)
-
-      // 给子进程一点时间完成窗口创建
-      setTimeout(() => {
-        resolve({ success: true, info: { appPath, appName }, session })
-      }, 1500)
+      perfChainMain('launchTargetApp_resolve', { sessionId: session.id, childPid, collectIntervalMs: CONFIG.collectInterval })
+      // 勿延迟 resolve：IPC 若挂起 1.5s 会拖住 invoke，前端表现为按钮点击后假死
+      resolve({ success: true, info: { appPath, appName }, session })
     })
   } catch (err) {
     console.error('[MonitorTool] Failed to launch target app:', err)
@@ -1051,6 +1292,14 @@ async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchA
 // ============ IPC 处理 ============
 
 function registerIpcHandlers(): void {
+  /** 渲染进程诊断写入同一 NDJSON 文件（不重复 console） */
+  ipcMain.on('diag:append', (_e, record: unknown) => {
+    if (!record || typeof record !== 'object') return
+    writeDiagNdjson({ ...(record as Record<string, unknown>), source: 'renderer' }, true)
+  })
+
+  ipcMain.handle('diag:get-log-path', (): string | null => getDiagLogPath())
+
   // ---- 采集控制 ----
   ipcMain.handle('collect:start', () => {
     startCollecting()

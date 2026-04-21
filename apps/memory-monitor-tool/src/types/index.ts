@@ -13,10 +13,17 @@ export interface ProcessMemoryInfo {
   executablePath?: string
   /** 外部监控：启动命令行（Win32_Process.CommandLine） */
   commandLine?: string
+  /**
+   * 外部监控：从命令行解析的 Chromium/CEF 角色（如 gpu-process、renderer），IPC 瘦身时仍保留；无则缺省。
+   */
+  chromiumType?: string
   cpu: {
     percentCPUUsage: number
     idleWakeupsPerSecond: number
   }
+  /** 外部监控：相对上一拍的磁盘速率（KB/s） */
+  diskReadKBps?: number
+  diskWriteKBps?: number
   memory: {
     workingSetSize: number       // 工作集 (KB)，作回退参考
     peakWorkingSetSize: number   // 峰值工作集 (KB)
@@ -44,6 +51,14 @@ export interface MemorySnapshot {
   externalRootPid?: number
   /** 外部模式：参与 totalWorkingSetSize 汇总的 PID */
   externalTotalIncludedPids?: number[]
+  /** 外部模式：CPU/磁盘为子树全部 PID 速率之和；GPU/显存为按子树 PID 过滤的 PDH 采样（首拍磁盘为 0） */
+  externalMetrics?: {
+    aggregateCpuPercent: number
+    diskReadKBps: number
+    diskWriteKBps: number
+    gpuEnginePercent: number | null
+    gpuDedicatedMB: number | null
+  }
 }
 
 export interface EventMark {
@@ -69,6 +84,8 @@ export interface SessionsListPayload {
   sessions: TestSession[]
   activeSessionId: string | null
 }
+
+import type { ResourceSummaryPayload } from '../utils/reportResourceSummary'
 
 // ============ 报告（面向测试的解读型报告） ============
 
@@ -122,6 +139,11 @@ export interface ReportSummary {
     rendererMB: number
     gpuMB: number
     processCount: number
+    extCpuPercent?: number
+    extDiskReadKBps?: number
+    extDiskWriteKBps?: number
+    extGpuEnginePercent?: number | null
+    extGpuDedicatedMB?: number | null
   }>
 
   /** 外部监控：进程树合计所依据的 PID（报告生成时取自最后一次采样） */
@@ -133,6 +155,12 @@ export interface ReportSummary {
 
   /** 阶段标记汇总（写入 report.json；旧报告可能缺省，可由快照兜底推导） */
   eventMarks?: ReportEventMark[]
+
+  /**
+   * 外部监控会话：由 dataPoints 中带 ext* 的采样汇总（与实时监控 externalMetrics 同源）。
+   * 旧版报告无此字段；仅有 dataPoints 时报告页可从 dataPoints 推导。
+   */
+  resourceSummary?: ResourceSummaryPayload
 }
 
 // ============ 对比结果 ============

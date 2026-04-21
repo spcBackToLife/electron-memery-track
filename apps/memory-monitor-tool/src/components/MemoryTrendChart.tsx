@@ -7,14 +7,17 @@ import {
   CartesianGrid,
   Tooltip,
   Legend,
-  ResponsiveContainer,
   ReferenceLine,
 } from 'recharts'
 import type { MemorySnapshot } from '../types'
 import { getEffectiveMemoryKB } from '../utils/format'
+import { downsampleUniform } from '../utils/chartDecimate'
+import { useChartContainerWidth } from '../hooks/useChartContainerWidth'
 
 interface MemoryTrendChartProps {
   snapshots: MemorySnapshot[]
+  /** 事件竖线、图例名称；默认与 snapshots 相同 */
+  marksSource?: MemorySnapshot[]
   height?: number
 }
 
@@ -34,6 +37,9 @@ const COLORS = {
 /** 外部进程树：单图最多展示的进程条数（按会话内峰值内存排序），超出部分合并为「其余」 */
 const EXTERNAL_TOP_PROCESS_LINES = 12
 
+/** 折线点数上限：减轻 Recharts 重绘（主进程仍写全量快照） */
+const MAX_CHART_SNAPSHOTS = 360
+
 const PROCESS_LINE_PALETTE = [
   '#f5a623',
   '#61dafb',
@@ -49,13 +55,12 @@ const PROCESS_LINE_PALETTE = [
   '#36cfc9',
 ]
 
-function legendLabelForPid(snapshots: MemorySnapshot[], pid: number): string {
-  for (let i = snapshots.length - 1; i >= 0; i--) {
-    const pr = snapshots[i].processes.find((x) => x.pid === pid)
-    if (pr) {
-      const base = (pr.name?.trim() || '进程').slice(0, 22)
-      return `${base} (${pid})`
-    }
+function legendLabelForPid(latest: MemorySnapshot | undefined, pid: number): string {
+  if (!latest) return `PID ${pid}`
+  const pr = latest.processes.find((x) => x.pid === pid)
+  if (pr) {
+    const base = (pr.name?.trim() || '进程').slice(0, 22)
+    return `${base} (${pid})`
   }
   return `PID ${pid}`
 }
@@ -72,12 +77,20 @@ type ExternalSeriesMeta = {
  * - 本工具（Electron）模式：总内存 + 主进程 / 渲染 / GPU
  * - 外部 exe 模式：进程树合计 + 各 PID 内存（峰值 Top N）+ 可选「其余进程」汇总
  */
-const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height = 320 }) => {
+const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, marksSource, height = 320 }) => {
+  const markSnaps = marksSource ?? snapshots
+  const latestForLegend = markSnaps.length > 0 ? markSnaps[markSnaps.length - 1] : undefined
+  const [boxRef, chartWidth] = useChartContainerWidth()
+
   const { hideElectronDetailLines, chartData, externalSeries } = useMemo(() => {
-    const hideElectronDetailLines = snapshots.some((s) => s.monitorMode === 'external')
+    const src =
+      snapshots.length > MAX_CHART_SNAPSHOTS
+        ? downsampleUniform(snapshots, MAX_CHART_SNAPSHOTS)
+        : snapshots
+    const hideElectronDetailLines = src.some((s) => s.monitorMode === 'external')
 
     if (!hideElectronDetailLines) {
-      const chartData = snapshots.map((s) => {
+      const chartData = src.map((s) => {
         const browserMem = s.processes
           .filter((p) => p.type === 'Browser')
           .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
@@ -101,7 +114,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
     }
 
     const peakKbByPid = new Map<number, number>()
-    for (const s of snapshots) {
+    for (const s of src) {
       if (s.monitorMode !== 'external') continue
       for (const p of s.processes) {
         const kb = getEffectiveMemoryKB(p.memory)
@@ -116,7 +129,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
 
     const legendByPid: Record<number, string> = {}
     for (const pid of topPids) {
-      legendByPid[pid] = legendLabelForPid(snapshots, pid)
+      legendByPid[pid] = legendLabelForPid(latestForLegend, pid)
     }
 
     const externalSeries: ExternalSeriesMeta = {
@@ -126,7 +139,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
       legendByPid,
     }
 
-    const chartData = snapshots.map((s) => {
+    const chartData = src.map((s) => {
       const ext = s.monitorMode === 'external'
       const row: Record<string, number | string | null> = {
         timestamp: s.timestamp,
@@ -157,7 +170,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
     })
 
     return { hideElectronDetailLines, chartData, externalSeries }
-  }, [snapshots])
+  }, [snapshots, latestForLegend])
 
   if (chartData.length === 0) {
     return (
@@ -172,15 +185,17 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
 
   const marks = useMemo(() => {
     const allMarks: Array<{ timestamp: number; label: string }> = []
-    for (const s of snapshots) {
+    for (const s of markSnaps) {
       if (s.marks) allMarks.push(...s.marks)
     }
     return allMarks
-  }, [snapshots])
+  }, [markSnaps])
+
+  const w = chartWidth > 40 ? chartWidth : 600
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
-      <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+    <div ref={boxRef as React.Ref<HTMLDivElement>} className="mmt-chart-size-box" style={{ width: '100%', height }}>
+      <LineChart width={w} height={height} data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
         <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
         <XAxis
           type="number"
@@ -219,6 +234,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
           stroke={COLORS.total}
           dot={false}
           strokeWidth={2}
+          isAnimationActive={false}
         />
         {hideElectronDetailLines && externalSeries
           ? (
@@ -233,6 +249,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
                     dot={false}
                     strokeWidth={1.35}
                     connectNulls={false}
+                    isAnimationActive={false}
                   />
                 ))}
                 {externalSeries.hasOtherBucket ? (
@@ -245,15 +262,16 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
                     dot={false}
                     strokeWidth={1.25}
                     connectNulls
+                    isAnimationActive={false}
                   />
                 ) : null}
               </>
             )
           : (
               <>
-                <Line type="monotone" dataKey="browser" name="主进程" stroke={COLORS.browser} dot={false} strokeWidth={1.5} />
-                <Line type="monotone" dataKey="renderer" name="渲染进程" stroke={COLORS.renderer} dot={false} strokeWidth={1.5} />
-                <Line type="monotone" dataKey="gpu" name="GPU" stroke={COLORS.gpu} dot={false} strokeWidth={1.5} />
+                <Line type="monotone" dataKey="browser" name="主进程" stroke={COLORS.browser} dot={false} strokeWidth={1.5} isAnimationActive={false} />
+                <Line type="monotone" dataKey="renderer" name="渲染进程" stroke={COLORS.renderer} dot={false} strokeWidth={1.5} isAnimationActive={false} />
+                <Line type="monotone" dataKey="gpu" name="GPU" stroke={COLORS.gpu} dot={false} strokeWidth={1.5} isAnimationActive={false} />
               </>
             )}
 
@@ -268,7 +286,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, height =
           />
         ))}
       </LineChart>
-    </ResponsiveContainer>
+    </div>
   )
 }
 
