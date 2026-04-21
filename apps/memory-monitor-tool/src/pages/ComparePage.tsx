@@ -17,7 +17,7 @@ import {
 
 /**
  * 回归对比页面 - 选择两次会话进行对比
- * 进程维度按「命令行 → 镜像路径 → 进程名 → PID」聚合，避免两次运行 PID 不同无法对应
+ * 进程维度按「命令行 → 镜像路径 → 进程名 → PID」聚合；分进程表仅取两侧对齐窗口内均观测到的身份。
  */
 const ComparePage: React.FC = () => {
   const [sessions, setSessions] = useState<TestSession[]>([])
@@ -225,7 +225,7 @@ const ComparePage: React.FC = () => {
             </select>
             <p className="compare-pid-hint">
               下方表格按进程身份聚合；点击行可切换上方曲线与「当前选择」数值表。旧会话若无命令行/路径字段，可能仍按名称或
-              PID 区分。
+              PID 区分。表中仅含两侧对齐采样内**都曾出现且各自至少一拍非零内存**的身份；仅单侧出现的不在此表对比。
             </p>
           </div>
 

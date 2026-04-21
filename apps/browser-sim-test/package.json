@@ -30,7 +30,7 @@
     "appId": "com.electronbenchmark.browser-sim-test",
     "productName": "Browser Sim Test",
     "directories": {
-      "output": "release2"
+      "output": "release3"
     },
     "files": [
       "dist/**/*",

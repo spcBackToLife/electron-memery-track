@@ -68,13 +68,35 @@ function memSumByIdentity(sn: MemorySnapshot, key: string): number {
   return Math.round((kb / 1024) * 10) / 10
 }
 
-function collectUnionIdentityKeys(base: MemorySnapshot[], target: MemorySnapshot[], n: number): string[] {
+function collectAppearingIdentityKeys(snaps: MemorySnapshot[], n: number): Set<string> {
   const set = new Set<string>()
   for (let i = 0; i < n; i++) {
-    for (const p of base[i]!.processes) set.add(identityKeyForProc(p, base[i]!))
-    for (const p of target[i]!.processes) set.add(identityKeyForProc(p, target[i]!))
+    for (const p of snaps[i]!.processes) {
+      set.add(identityKeyForProc(p, snaps[i]!))
+    }
   }
-  return [...set].sort((a, b) => a.localeCompare(b))
+  return set
+}
+
+function hadPositiveMemoryInWindow(snaps: MemorySnapshot[], n: number, key: string): boolean {
+  for (let i = 0; i < n; i++) {
+    if (memSumByIdentity(snaps[i]!, key) > 0) return true
+  }
+  return false
+}
+
+/** 两侧都曾以该身份出现，且各自窗口内至少一拍上该身份内存合计 > 0 */
+function collectIntersectingIdentityKeys(base: MemorySnapshot[], target: MemorySnapshot[], n: number): string[] {
+  const baseKeys = collectAppearingIdentityKeys(base, n)
+  const targetKeys = collectAppearingIdentityKeys(target, n)
+  const out: string[] = []
+  for (const k of baseKeys) {
+    if (!targetKeys.has(k)) continue
+    if (!hadPositiveMemoryInWindow(base, n, k)) continue
+    if (!hadPositiveMemoryInWindow(target, n, k)) continue
+    out.push(k)
+  }
+  return out.sort((a, b) => a.localeCompare(b))
 }
 
 function inferLabelAndDetail(
@@ -163,7 +185,10 @@ function diffStats(
   }
 }
 
-/** 对齐两会话快照后，按「命令行 / 镜像路径 / 名称 / PID」聚合再算峰值、均值、末值 */
+/**
+ * 对齐两会话快照后，按「命令行 / 镜像路径 / 名称 / PID」聚合再算峰值、均值、末值。
+ * 仅包含两侧窗口内都曾出现、且各自至少一拍上该身份内存合计 > 0 的键（不做进程名单或 MB 阈值特例）。
+ */
 export function computePidCompareTable(
   base: MemorySnapshot[],
   target: MemorySnapshot[],
@@ -171,7 +196,7 @@ export function computePidCompareTable(
   const n = Math.min(base.length, target.length)
   if (n === 0) return []
 
-  const keys = collectUnionIdentityKeys(base, target, n)
+  const keys = collectIntersectingIdentityKeys(base, target, n)
   const rows: PidCompareRow[] = []
 
   for (const identityKey of keys) {

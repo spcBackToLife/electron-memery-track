@@ -33,7 +33,7 @@
         "appId": "com.electronbenchmark.memory-monitor-tool",
         "productName": "Electron Memory Monitor Tool",
         "directories": {
-            "output": "release2"
+            "output": "release3"
         },
         "asar": true,
         "asarUnpack": ["**/*.node"],

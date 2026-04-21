@@ -7,6 +7,7 @@
 //   - batchGetPrivateWorkingSet(pids[])
 //   - batchGetProcessMemory(pids[])
 //   - enumerateProcessTree(rootPid) — Toolhelp32 + QueryFullProcessImageName + NtQueryInformationProcess
+//   - gatherExternalMonitorSnapshotAsync(rootPid) — Promise；同上枚举 + 每 PID 内存与 Times/IO，在 AsyncWorker 中执行
 //   - batchGetProcessTimesAndIo(pids[]) — GetProcessTimes + GetProcessIoCounters（主进程算间隔速率）
 //   - queryGpuSystemSnapshotAsync([pids]) — Promise；PDH 采样 GPU；可选 PID 数组按实例名 pid_* 过滤（对齐任务管理器进程列）
 //
@@ -326,19 +327,22 @@ Napi::Value BatchGetProcessTimesAndIoNapi(const Napi::CallbackInfo& info) {
 #endif
 }
 
-Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
-  Napi::Env env = info.Env();
-#ifdef _WIN32
-  if (info.Length() < 1 || !info[0].IsNumber()) {
-    Napi::TypeError::New(env, "Expected rootPid (number)").ThrowAsJavaScriptException();
-    return env.Null();
-  }
-  DWORD rootPid = info[0].As<Napi::Number>().Uint32Value();
-  Napi::Array out = Napi::Array::New(env);
-  if (rootPid == 0) return out;
+/** 单进程在子树快照中的一行（宽字符串在转 JS 时再 UTF-8）。 */
+struct ProcSnapRow {
+  DWORD pid;
+  DWORD parentPid;
+  std::wstring displayName;
+  std::wstring exePath;
+  std::wstring cmdLine;
+};
+
+/** Toolhelp32 BFS + 每 PID OpenProcess 读镜像与命令行；供同步 enumerate 与 AsyncWorker 共用。 */
+static bool GatherSubtreeProcRows(DWORD rootPid, std::vector<ProcSnapRow>* out_rows) {
+  out_rows->clear();
+  if (rootPid == 0) return false;
 
   HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  if (snap == INVALID_HANDLE_VALUE) return out;
+  if (snap == INVALID_HANDLE_VALUE) return false;
 
   std::unordered_map<DWORD, std::vector<DWORD>> children;
   std::unordered_map<DWORD, DWORD> parentOf;
@@ -373,39 +377,242 @@ Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
     }
   }
 
-  uint32_t idx = 0;
   for (DWORD pid : order) {
+    ProcSnapRow row;
+    row.pid = pid;
+    auto pit = parentOf.find(pid);
+    row.parentPid = (pit != parentOf.end()) ? pit->second : 0;
+
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    std::wstring exePath;
-    std::wstring cmdLine;
+    row.exePath.clear();
+    row.cmdLine.clear();
     if (h) {
-      exePath = QueryFullImagePath(h);
-      cmdLine = QueryProcessCommandLineWide(h);
+      row.exePath = QueryFullImagePath(h);
+      row.cmdLine = QueryProcessCommandLineWide(h);
       CloseHandle(h);
     }
     std::wstring shortName = shortExe.count(pid) ? shortExe[pid] : std::wstring();
-    std::wstring displayName = shortName;
-    if (!exePath.empty()) {
-      size_t pos = exePath.find_last_of(L"\\/");
-      if (pos != std::wstring::npos) displayName = exePath.substr(pos + 1);
-      else displayName = exePath;
+    row.displayName = shortName;
+    if (!row.exePath.empty()) {
+      size_t pos = row.exePath.find_last_of(L"\\/");
+      if (pos != std::wstring::npos) row.displayName = row.exePath.substr(pos + 1);
+      else row.displayName = row.exePath;
     }
+    out_rows->push_back(std::move(row));
+  }
+  return !out_rows->empty();
+}
 
-    DWORD ppidOut = 0;
-    auto pit = parentOf.find(pid);
-    if (pit != parentOf.end()) ppidOut = pit->second;
+/** 与 TS filterProcessTreeRowsStrictDescendants 一致：仅保留父链能回到 root 的节点。 */
+static void FilterProcessTreeRowsStrictDescendantsCpp(DWORD rootPid, std::vector<ProcSnapRow>* io_rows) {
+  if (io_rows->size() <= 1) return;
+  std::unordered_map<DWORD, DWORD> parents;
+  for (const auto& r : *io_rows) {
+    if (r.parentPid > 0) parents[r.pid] = r.parentPid;
+  }
+  if (parents.empty()) return;
 
+  auto under = [&](DWORD start) -> bool {
+    std::set<DWORD> seen;
+    DWORD cur = start;
+    for (int i = 0; i < 4096; ++i) {
+      if (cur == rootPid) return true;
+      if (seen.count(cur)) return false;
+      seen.insert(cur);
+      auto it = parents.find(cur);
+      if (it == parents.end() || it->second <= 0) return false;
+      cur = it->second;
+    }
+    return false;
+  };
+
+  std::vector<ProcSnapRow> kept;
+  kept.reserve(io_rows->size());
+  for (const auto& r : *io_rows) {
+    if (r.pid == rootPid || under(r.pid)) kept.push_back(r);
+  }
+  if (!kept.empty()) *io_rows = std::move(kept);
+}
+
+Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+#ifdef _WIN32
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "Expected rootPid (number)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD rootPid = info[0].As<Napi::Number>().Uint32Value();
+  Napi::Array out = Napi::Array::New(env);
+  if (rootPid == 0) return out;
+
+  std::vector<ProcSnapRow> rows;
+  if (!GatherSubtreeProcRows(rootPid, &rows)) return out;
+
+  uint32_t idx = 0;
+  for (const auto& r : rows) {
     Napi::Object row = Napi::Object::New(env);
-    row.Set("pid", Napi::Number::New(env, (double)pid));
-    row.Set("parentPid", Napi::Number::New(env, (double)ppidOut));
-    row.Set("name", Napi::String::New(env, WideToUtf8(displayName)));
-    row.Set("exePath", Napi::String::New(env, WideToUtf8(exePath)));
-    row.Set("commandLine", Napi::String::New(env, WideToUtf8(cmdLine)));
+    row.Set("pid", Napi::Number::New(env, (double)r.pid));
+    row.Set("parentPid", Napi::Number::New(env, (double)r.parentPid));
+    row.Set("name", Napi::String::New(env, WideToUtf8(r.displayName)));
+    row.Set("exePath", Napi::String::New(env, WideToUtf8(r.exePath)));
+    row.Set("commandLine", Napi::String::New(env, WideToUtf8(r.cmdLine)));
     out.Set(idx++, row);
   }
   return out;
 #else
   return Napi::Array::New(env, 0);
+#endif
+}
+
+struct GatheredPidMetrics {
+  DWORD pid;
+  DWORD parentPid;
+  std::string name;
+  std::string exePath;
+  std::string cmdLine;
+  double privKb;
+  double wsKb;
+  double peakKb;
+  double userTime100ns;
+  double kernelTime100ns;
+  double readBytes;
+  double writeBytes;
+};
+
+class ExternalGatherMonitorWorker : public Napi::AsyncWorker {
+ public:
+  ExternalGatherMonitorWorker(Napi::Env env, DWORD rootPid)
+    : Napi::AsyncWorker(env, "mmtExternalGather"),
+      deferred_(Napi::Promise::Deferred::New(env)),
+      rootPid_(rootPid) {}
+
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+ protected:
+  void Execute() override {
+#ifdef _WIN32
+    if (rootPid_ == 0) return;
+    std::vector<ProcSnapRow> rows;
+    if (!GatherSubtreeProcRows(rootPid_, &rows)) return;
+    // 父链过滤在 TS 层与 enumerateProcessTreeNativeSync 一致；此处 C++ 过滤曾误伤子进程导致只余根 PID
+
+    for (const auto& r : rows) {
+      GatheredPidMetrics g;
+      g.pid = r.pid;
+      g.parentPid = r.parentPid;
+      g.name = WideToUtf8(r.displayName);
+      g.exePath = WideToUtf8(r.exePath);
+      g.cmdLine = WideToUtf8(r.cmdLine);
+
+      int64_t privBytes = GetPrivateWorkingSetBytes(r.pid);
+      SIZE_T ws = 0, peakWs = 0, privU = 0, pf = 0;
+      if (!GetProcessMemoryDetails(r.pid, ws, peakWs, privU, pf)) {
+        ws = peakWs = privU = 0;
+      }
+      double privKb = (privBytes >= 0) ? std::floor(static_cast<double>(privBytes) / 1024.0) : 0.0;
+      double wsKb = std::floor(static_cast<double>(ws) / 1024.0);
+      if (wsKb < 0) wsKb = 0;
+      double peakKb = std::floor(static_cast<double>(peakWs) / 1024.0);
+      if (peakKb < 0) peakKb = 0;
+      if (privKb <= 0) privKb = wsKb;
+      if (peakKb <= 0) peakKb = wsKb;
+      g.privKb = privKb;
+      g.wsKb = wsKb;
+      g.peakKb = peakKb;
+
+      g.userTime100ns = 0;
+      g.kernelTime100ns = 0;
+      g.readBytes = 0;
+      g.writeBytes = 0;
+      HANDLE ph = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, r.pid);
+      if (ph) {
+        FILETIME tc, te, tk, tu;
+        IO_COUNTERS io;
+        BOOL okTimes = GetProcessTimes(static_cast<HANDLE>(ph), &tc, &te, &tk, &tu);
+        BOOL okIo = GetProcessIoCounters(static_cast<HANDLE>(ph), &io);
+        CloseHandle(ph);
+        if (okTimes) {
+          g.userTime100ns = FiletimeToDouble100ns(tu);
+          g.kernelTime100ns = FiletimeToDouble100ns(tk);
+        }
+        if (okIo) {
+          g.readBytes = static_cast<double>(io.ReadTransferCount);
+          g.writeBytes = static_cast<double>(io.WriteTransferCount);
+        }
+      }
+      gathered_.push_back(std::move(g));
+    }
+#endif
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::HandleScope hs(env);
+#ifdef _WIN32
+    if (gathered_.empty()) {
+      deferred_.Resolve(env.Null());
+      return;
+    }
+    Napi::Object root = Napi::Object::New(env);
+    Napi::Array tree = Napi::Array::New(env);
+    Napi::Object memory = Napi::Object::New(env);
+    Napi::Object timesIo = Napi::Object::New(env);
+    uint32_t ti = 0;
+    for (const auto& g : gathered_) {
+      Napi::Object row = Napi::Object::New(env);
+      row.Set("pid", Napi::Number::New(env, static_cast<double>(g.pid)));
+      row.Set("parentPid", Napi::Number::New(env, static_cast<double>(g.parentPid)));
+      row.Set("name", Napi::String::New(env, g.name));
+      row.Set("exePath", Napi::String::New(env, g.exePath));
+      row.Set("commandLine", Napi::String::New(env, g.cmdLine));
+      tree.Set(ti++, row);
+
+      Napi::Object m = Napi::Object::New(env);
+      m.Set("privateKb", Napi::Number::New(env, g.privKb));
+      m.Set("workingSetKb", Napi::Number::New(env, g.wsKb));
+      m.Set("peakKb", Napi::Number::New(env, g.peakKb));
+      memory.Set(std::to_string(g.pid), m);
+
+      Napi::Object t = Napi::Object::New(env);
+      t.Set("userTime100ns", Napi::Number::New(env, g.userTime100ns));
+      t.Set("kernelTime100ns", Napi::Number::New(env, g.kernelTime100ns));
+      t.Set("readBytes", Napi::Number::New(env, g.readBytes));
+      t.Set("writeBytes", Napi::Number::New(env, g.writeBytes));
+      timesIo.Set(std::to_string(g.pid), t);
+    }
+    root.Set("tree", tree);
+    root.Set("memory", memory);
+    root.Set("timesIo", timesIo);
+    deferred_.Resolve(root);
+#else
+    deferred_.Resolve(env.Null());
+#endif
+  }
+
+  void OnError(const Napi::Error& err) override { deferred_.Reject(err.Value()); }
+
+ private:
+  Napi::Promise::Deferred deferred_;
+  DWORD rootPid_;
+  std::vector<GatheredPidMetrics> gathered_;
+};
+
+Napi::Value GatherExternalMonitorSnapshotAsyncNapi(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+#ifdef _WIN32
+  if (info.Length() < 1 || !info[0].IsNumber()) {
+    Napi::TypeError::New(env, "Expected rootPid (number)").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  DWORD root = info[0].As<Napi::Number>().Uint32Value();
+  ExternalGatherMonitorWorker* w = new ExternalGatherMonitorWorker(env, root);
+  Napi::Promise p = w->GetPromise();
+  w->Queue();
+  return p;
+#else
+  Napi::Promise::Deferred def = Napi::Promise::Deferred::New(env);
+  def.Resolve(env.Null());
+  return def.Promise();
 #endif
 }
 
@@ -747,6 +954,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("batchGetPrivateWorkingSet", Napi::Function::New(env, BatchGetPrivateWorkingSetNapi));
   exports.Set("batchGetProcessMemory", Napi::Function::New(env, BatchGetProcessMemoryNapi));
   exports.Set("enumerateProcessTree", Napi::Function::New(env, EnumerateProcessTreeNapi));
+  exports.Set("gatherExternalMonitorSnapshotAsync", Napi::Function::New(env, GatherExternalMonitorSnapshotAsyncNapi));
   exports.Set("batchGetProcessTimesAndIo", Napi::Function::New(env, BatchGetProcessTimesAndIoNapi));
   exports.Set("queryGpuSystemSnapshotAsync", Napi::Function::New(env, QueryGpuSystemSnapshotAsyncNapi));
   return exports;
