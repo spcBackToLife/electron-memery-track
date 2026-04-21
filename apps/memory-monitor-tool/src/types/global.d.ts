@@ -44,6 +44,10 @@ export interface MonitorAPI {
   // 导出
   exportSession: (sessionId: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
 
+  /** 诊断 NDJSON 写入 userData/mmt-diag.log */
+  diagAppend: (row: Record<string, unknown>) => void
+  getDiagLogPath: () => Promise<string | null>
+
   // 事件监听
   onSnapshotUpdate: (callback: (data: unknown) => void) => () => void
   onSessionStarted: (callback: (data: unknown) => void) => () => void

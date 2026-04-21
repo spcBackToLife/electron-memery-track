@@ -205,6 +205,58 @@ export interface CompareTrendPoint {
   targetMB: number
 }
 
+/** 按采样序号对齐后的外部资源（CPU / 磁盘 / GPU）；缺字段按 0 或 null */
+export interface CompareResourcePoint {
+  index: number
+  baseCpu: number
+  targetCpu: number
+  baseDiskRead: number
+  targetDiskRead: number
+  baseDiskWrite: number
+  targetDiskWrite: number
+  baseGpu: number | null
+  targetGpu: number | null
+  baseVram: number | null
+  targetVram: number | null
+}
+
+export function buildCompareResourcePoints(
+  base: MemorySnapshot[],
+  target: MemorySnapshot[],
+): CompareResourcePoint[] {
+  const n = Math.min(base.length, target.length)
+  if (n < 2) return []
+  const out: CompareResourcePoint[] = []
+  for (let i = 0; i < n; i++) {
+    const b = base[i]!.externalMetrics
+    const t = target[i]!.externalMetrics
+    out.push({
+      index: i,
+      baseCpu: Math.round((b?.aggregateCpuPercent ?? 0) * 100) / 100,
+      targetCpu: Math.round((t?.aggregateCpuPercent ?? 0) * 100) / 100,
+      baseDiskRead: Math.round((b?.diskReadKBps ?? 0) * 100) / 100,
+      targetDiskRead: Math.round((t?.diskReadKBps ?? 0) * 100) / 100,
+      baseDiskWrite: Math.round((b?.diskWriteKBps ?? 0) * 100) / 100,
+      targetDiskWrite: Math.round((t?.diskWriteKBps ?? 0) * 100) / 100,
+      baseGpu: b?.gpuEnginePercent != null ? Math.round(b.gpuEnginePercent * 10) / 10 : null,
+      targetGpu: t?.gpuEnginePercent != null ? Math.round(t.gpuEnginePercent * 10) / 10 : null,
+      baseVram: b?.gpuDedicatedMB != null ? Math.round(b.gpuDedicatedMB * 10) / 10 : null,
+      targetVram: t?.gpuDedicatedMB != null ? Math.round(t.gpuDedicatedMB * 10) / 10 : null,
+    })
+  }
+  return out
+}
+
+/** 至少一侧快照带 externalMetrics 且对齐点数 ≥2 */
+export function hasCompareResourceSeries(base: MemorySnapshot[], target: MemorySnapshot[]): boolean {
+  const n = Math.min(base.length, target.length)
+  if (n < 2) return false
+  for (let i = 0; i < n; i++) {
+    if (base[i]!.externalMetrics != null || target[i]!.externalMetrics != null) return true
+  }
+  return false
+}
+
 export function buildCompareTrendPoints(
   base: MemorySnapshot[],
   target: MemorySnapshot[],
@@ -227,6 +279,140 @@ export function buildCompareTrendPoints(
     merged.push({ index: i, baseMB: bS[i]!, targetMB: tS[i]! })
   }
   return merged
+}
+
+/** 会话级外部资源（CPU/磁盘/GPU）数值对比行，与「会话合计」内存表同一套列 */
+export interface ExternalResourceCompareFlatRow {
+  label: string
+  base: number | null
+  target: number | null
+  diff: number | null
+  changePercent: number | null
+}
+
+function externalCpuSeries(snaps: MemorySnapshot[], n: number): number[] {
+  return Array.from({ length: n }, (_, i) => snaps[i]!.externalMetrics?.aggregateCpuPercent ?? 0)
+}
+
+function externalDiskReadSeries(snaps: MemorySnapshot[], n: number): number[] {
+  return Array.from({ length: n }, (_, i) => snaps[i]!.externalMetrics?.diskReadKBps ?? 0)
+}
+
+function externalDiskWriteSeries(snaps: MemorySnapshot[], n: number): number[] {
+  return Array.from({ length: n }, (_, i) => snaps[i]!.externalMetrics?.diskWriteKBps ?? 0)
+}
+
+function externalGpuSeries(snaps: MemorySnapshot[], n: number): (number | null)[] {
+  return Array.from({ length: n }, (_, i) => {
+    const v = snaps[i]!.externalMetrics?.gpuEnginePercent
+    if (v == null || Number.isNaN(v)) return null
+    return v
+  })
+}
+
+function externalVramSeries(snaps: MemorySnapshot[], n: number): (number | null)[] {
+  return Array.from({ length: n }, (_, i) => {
+    const v = snaps[i]!.externalMetrics?.gpuDedicatedMB
+    if (v == null || Number.isNaN(v)) return null
+    return v
+  })
+}
+
+function statsTripleNullable(s: (number | null)[]): { peak: number | null; avg: number | null; final: number | null } {
+  const nums = s.filter((x): x is number => x != null && !Number.isNaN(x))
+  const lastRaw = s[s.length - 1]
+  const final =
+    lastRaw != null && !Number.isNaN(lastRaw) ? Math.round(lastRaw * 10) / 10 : null
+  if (nums.length === 0) return { peak: null, avg: null, final }
+  return {
+    peak: Math.round(Math.max(...nums) * 10) / 10,
+    avg: Math.round((nums.reduce((a, b) => a + b, 0) / nums.length) * 10) / 10,
+    final,
+  }
+}
+
+function diffScalarPair(
+  base: number | null,
+  target: number | null,
+): { diff: number | null; changePercent: number | null } {
+  if (base == null || target == null) return { diff: null, changePercent: null }
+  const diff = Math.round((target - base) * 10) / 10
+  return { diff, changePercent: pctOrNull(base, diff) }
+}
+
+function pushTripleRows(
+  out: ExternalResourceCompareFlatRow[],
+  title: string,
+  unit: string,
+  bs: { peak: number; avg: number; final: number },
+  ts: { peak: number; avg: number; final: number },
+): void {
+  const mk = (suffix: string, b: number, t: number) => {
+    const { diff, changePercent } = diffScalarPair(b, t)
+    out.push({
+      label: `${suffix} ${title} (${unit})`,
+      base: b,
+      target: t,
+      diff,
+      changePercent,
+    })
+  }
+  mk('峰值', bs.peak, ts.peak)
+  mk('平均', bs.avg, ts.avg)
+  mk('末值', bs.final, ts.final)
+}
+
+function pushTripleRowsNullable(
+  out: ExternalResourceCompareFlatRow[],
+  title: string,
+  unit: string,
+  bs: { peak: number | null; avg: number | null; final: number | null },
+  ts: { peak: number | null; avg: number | null; final: number | null },
+): void {
+  const mk = (suffix: string, b: number | null, t: number | null) => {
+    const { diff, changePercent } = diffScalarPair(b, t)
+    out.push({
+      label: `${suffix} ${title} (${unit})`,
+      base: b,
+      target: t,
+      diff,
+      changePercent,
+    })
+  }
+  mk('峰值', bs.peak, ts.peak)
+  mk('平均', bs.avg, ts.avg)
+  mk('末值', bs.final, ts.final)
+}
+
+/**
+ * 对齐两会话快照后，对比子树 CPU/磁盘与 GPU（PDH 子树 PID 汇总；仅会话级指标，与分进程内存选择无关）。
+ */
+export function computeExternalResourceCompareRows(
+  base: MemorySnapshot[],
+  target: MemorySnapshot[],
+): ExternalResourceCompareFlatRow[] {
+  const n = Math.min(base.length, target.length)
+  if (n < 1) return []
+  if (!hasCompareResourceSeries(base, target)) return []
+
+  const bCpu = statsFromSeries(externalCpuSeries(base, n))
+  const tCpu = statsFromSeries(externalCpuSeries(target, n))
+  const bRead = statsFromSeries(externalDiskReadSeries(base, n))
+  const tRead = statsFromSeries(externalDiskReadSeries(target, n))
+  const bWrite = statsFromSeries(externalDiskWriteSeries(base, n))
+  const tWrite = statsFromSeries(externalDiskWriteSeries(target, n))
+  const bGpu = statsTripleNullable(externalGpuSeries(base, n))
+  const tGpu = statsTripleNullable(externalGpuSeries(target, n))
+  const bVram = statsTripleNullable(externalVramSeries(base, n))
+  const tVram = statsTripleNullable(externalVramSeries(target, n))
+
+  const out: ExternalResourceCompareFlatRow[] = []
+  pushTripleRows(out, 'CPU', '%', bCpu, tCpu)
+  pushTripleRows(out, '磁盘读取', 'KB/s', bRead, tRead)
+  pushTripleRows(out, '磁盘写入', 'KB/s', bWrite, tWrite)
+  pushTripleRowsNullable(out, 'GPU 引擎', '%', bGpu, tGpu)
+  pushTripleRowsNullable(out, 'GPU 显存', 'MB', bVram, tVram)
+  return out
 }
 
 export function getSelectionMetricsRow(

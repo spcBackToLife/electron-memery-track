@@ -2,7 +2,7 @@
  * useMemoryData - 实时内存数据 Hook
  * 管理快照缓冲区、标记时间线、GC/标记操作
  */
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import type { MemorySnapshot, EventMark, TestSession } from '../types'
 
 export interface MemoryData {
@@ -29,11 +29,12 @@ export function useMemoryData(): MemoryData {
   const [currentSession, setCurrentSession] = useState<TestSession | null>(null)
   const snapshotsRef = useRef<MemorySnapshot[]>([])
 
-  // 订阅实时快照
+  // 订阅实时快照（每拍一条 [MMT:diag] 在 useLayoutEffect）
   useEffect(() => {
     const cleanup = window.monitorAPI.onSnapshotUpdate((data) => {
       const snapshot = data as MemorySnapshot
 
+      snapshotsRef.current = [...snapshotsRef.current, snapshot].slice(-MAX_BUFFER_SIZE)
       setSnapshots((prev) => {
         const updated = [...prev, snapshot]
         if (updated.length > MAX_BUFFER_SIZE) {
@@ -41,13 +42,12 @@ export function useMemoryData(): MemoryData {
         }
         return updated
       })
-      snapshotsRef.current = [...snapshotsRef.current, snapshot].slice(-MAX_BUFFER_SIZE)
     })
 
     // 订阅会话状态变化
     const sessionStartCleanup = window.monitorAPI.onSessionStarted((data) => {
-      setCurrentSession(data as TestSession)
-      // 新会话开始时清空缓冲区
+      const s = data as TestSession
+      setCurrentSession(s)
       setSnapshots([])
       snapshotsRef.current = []
     })
@@ -66,14 +66,13 @@ export function useMemoryData(): MemoryData {
 
   const latestSnapshot = snapshots.length > 0 ? snapshots[snapshots.length - 1] : null
 
-  // 收集所有快照中的标记
-  const markTimeline: EventMark[] = (() => {
+  const markTimeline: EventMark[] = useMemo(() => {
     const marks: EventMark[] = []
     for (const s of snapshots) {
       if (s.marks) marks.push(...s.marks)
     }
     return marks
-  })()
+  }, [snapshots])
 
   const addMark = useCallback(async (label: string): Promise<boolean> => {
     return window.monitorAPI.addMark(label)

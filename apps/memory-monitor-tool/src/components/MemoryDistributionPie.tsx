@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react'
-import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer, Legend } from 'recharts'
+import { PieChart, Pie, Cell, Tooltip, Legend } from 'recharts'
+import { useChartContainerWidth } from '../hooks/useChartContainerWidth'
 import type { ProcessMemoryInfo } from '../types'
 import { getEffectiveMemoryKB } from '../utils/format'
 
@@ -44,6 +45,9 @@ const MemoryDistributionPie: React.FC<MemoryDistributionPieProps> = ({
   externalMonitor = false,
   externalTotalIncludedPids,
 }) => {
+  const [boxRef, w] = useChartContainerWidth()
+  const chartW = w > 40 ? w : 260
+
   const data = useMemo(() => {
     const names = externalMonitor ? TYPE_NAMES_EXTERNAL : TYPE_NAMES_SELF
     const included =
@@ -66,8 +70,8 @@ const MemoryDistributionPie: React.FC<MemoryDistributionPieProps> = ({
   }, [processes, externalMonitor, externalTotalIncludedPids])
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
-      <PieChart>
+    <div ref={boxRef as React.Ref<HTMLDivElement>} className="mmt-chart-size-box" style={{ width: '100%', height }}>
+      <PieChart width={chartW} height={height}>
         <Pie
           data={data}
           dataKey="value"
@@ -97,7 +101,7 @@ const MemoryDistributionPie: React.FC<MemoryDistributionPieProps> = ({
         />
         <Legend />
       </PieChart>
-    </ResponsiveContainer>
+    </div>
   )
 }
 

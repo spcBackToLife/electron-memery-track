@@ -2,13 +2,17 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import type { TestSession, CompareResult, MemorySnapshot } from '../types'
 import { useToast } from '../context/ToastContext'
 import CompareDataCharts, { type CompareChartMarkRef } from '../components/CompareDataCharts'
+import CompareResourceTrendCharts from '../components/CompareResourceTrendCharts'
 import { formatSessionSelectLabel, formatTime } from '../utils/format'
 import { collectReportEventMarksFromSnapshots, snapshotIndexForMark } from '../utils/reportEventMarks'
 import type { ComparePidSelection, PidCompareRow } from '../utils/comparePidMetrics'
 import {
   buildCompareTrendPoints,
+  buildCompareResourcePoints,
   computePidCompareTable,
+  computeExternalResourceCompareRows,
   getSelectionMetricsRow,
+  hasCompareResourceSeries,
 } from '../utils/comparePidMetrics'
 
 /**
@@ -47,9 +51,24 @@ const ComparePage: React.FC = () => {
     return buildCompareTrendPoints(snapPair.base, snapPair.target, selectedCompare)
   }, [snapPair, selectedCompare])
 
+  const compareResourcePoints = useMemo(() => {
+    if (!snapPair) return []
+    return buildCompareResourcePoints(snapPair.base, snapPair.target)
+  }, [snapPair])
+
+  const showResourceCompare = useMemo(() => {
+    if (!snapPair || compareResourcePoints.length < 2) return false
+    return hasCompareResourceSeries(snapPair.base, snapPair.target)
+  }, [snapPair, compareResourcePoints])
+
   const selectionRow = useMemo(() => {
     if (!snapPair) return null
     return getSelectionMetricsRow(snapPair.base, snapPair.target, selectedCompare)
+  }, [snapPair, selectedCompare])
+
+  const externalResourceCompareRows = useMemo(() => {
+    if (!snapPair || selectedCompare !== 'aggregate') return []
+    return computeExternalResourceCompareRows(snapPair.base, snapPair.target)
   }, [snapPair, selectedCompare])
 
   const baseSessionMarks = useMemo(() => {
@@ -136,6 +155,8 @@ const ComparePage: React.FC = () => {
   const fmtPctNum = (v: number) => (v > 0 ? `+${v}` : `${v}`)
   const fmtPctCell = (v: number | null) => (v === null ? '—' : `${fmtPctNum(v)}%`)
   const pctWarn = (v: number | null) => v != null && Math.abs(v) > 10
+  const fmtMetricCell = (v: number | null) => (v == null ? '—' : `${v}`)
+  const isFinalResourceRow = (label: string) => label.startsWith('末值 ')
 
   return (
     <div className="mmt-compare-page">
@@ -207,6 +228,15 @@ const ComparePage: React.FC = () => {
               PID 区分。
             </p>
           </div>
+
+          {showResourceCompare ? (
+            <CompareResourceTrendCharts
+              points={compareResourcePoints}
+              baseLabel={`基线: ${sessions.find((x) => x.id === baseId)?.label ?? baseId}`}
+              targetLabel={`目标: ${sessions.find((x) => x.id === targetId)?.label ?? targetId}`}
+              markRefs={compareChartMarkRefs.length > 0 ? compareChartMarkRefs : undefined}
+            />
+          ) : null}
 
           {snapPair && (baseSessionMarks.length > 0 || targetSessionMarks.length > 0) && (
             <div className="compare-event-marks">
@@ -308,12 +338,17 @@ const ComparePage: React.FC = () => {
           {selectionRow && (
             <div className="comparison-metrics">
               <h3>📊 数值对比（当前选择：{selectionRow.label}）</h3>
+              {showResourceCompare && selectedCompare !== 'aggregate' ? (
+                <p className="chart-caption" style={{ marginBottom: 10 }}>
+                  CPU、磁盘、GPU 为<strong>会话级</strong>外部指标；下表「资源」行仅在<strong>会话合计</strong>选择下展示。
+                </p>
+              ) : null}
               <table className="compare-table">
                 <thead>
                   <tr>
                     <th>指标</th>
-                    <th>基线 (MB)</th>
-                    <th>目标 (MB)</th>
+                    <th>基线</th>
+                    <th>目标</th>
                     <th>差值</th>
                     <th>变化率</th>
                     <th>判定</th>
@@ -321,7 +356,7 @@ const ComparePage: React.FC = () => {
                 </thead>
                 <tbody>
                   <tr>
-                    <td>峰值内存</td>
+                    <td>峰值内存 (MB)</td>
                     <td>{selectionRow.peakBaseMB}</td>
                     <td>{selectionRow.peakTargetMB}</td>
                     <td className={selectionRow.peakDiffMB > 0 ? 'diff-bad' : 'diff-good'}>
@@ -339,7 +374,7 @@ const ComparePage: React.FC = () => {
                     <td>{pctWarn(selectionRow.peakChangePercent) ? '⚠️' : '✅'}</td>
                   </tr>
                   <tr>
-                    <td>平均内存</td>
+                    <td>平均内存 (MB)</td>
                     <td>{selectionRow.avgBaseMB}</td>
                     <td>{selectionRow.avgTargetMB}</td>
                     <td className={selectionRow.avgDiffMB > 0 ? 'diff-bad' : 'diff-good'}>
@@ -357,7 +392,7 @@ const ComparePage: React.FC = () => {
                     <td>{pctWarn(selectionRow.avgChangePercent) ? '⚠️' : '✅'}</td>
                   </tr>
                   <tr>
-                    <td>末值内存</td>
+                    <td>末值内存 (MB)</td>
                     <td>{selectionRow.finalBaseMB}</td>
                     <td>{selectionRow.finalTargetMB}</td>
                     <td className={selectionRow.finalDiffMB > 0 ? 'diff-bad' : 'diff-good'}>
@@ -366,6 +401,40 @@ const ComparePage: React.FC = () => {
                     <td>—</td>
                     <td>—</td>
                   </tr>
+                  {selectedCompare === 'aggregate' &&
+                    externalResourceCompareRows.map((row, idx) => {
+                      const fin = isFinalResourceRow(row.label)
+                      const diffClass =
+                        row.diff == null
+                          ? ''
+                          : row.diff > 0
+                            ? 'diff-bad'
+                            : 'diff-good'
+                      return (
+                        <tr key={`ext-metric-${idx}`}>
+                          <td>{row.label}</td>
+                          <td>{fmtMetricCell(row.base)}</td>
+                          <td>{fmtMetricCell(row.target)}</td>
+                          <td className={diffClass}>
+                            {row.diff == null ? '—' : fmtDiff(row.diff)}
+                          </td>
+                          <td
+                            className={
+                              !fin && row.changePercent != null && row.changePercent > 0
+                                ? 'diff-bad'
+                                : !fin && row.changePercent != null
+                                  ? 'diff-good'
+                                  : ''
+                            }
+                          >
+                            {fin ? '—' : fmtPctCell(row.changePercent)}
+                          </td>
+                          <td>
+                            {fin ? '—' : row.changePercent == null ? '—' : pctWarn(row.changePercent) ? '⚠️' : '✅'}
+                          </td>
+                        </tr>
+                      )
+                    })}
                 </tbody>
               </table>
             </div>

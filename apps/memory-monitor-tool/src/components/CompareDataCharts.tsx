@@ -55,7 +55,7 @@ const CompareDataCharts: React.FC<CompareDataChartsProps> = ({
           ? ' 蓝色 / 橙色竖线分别表示基线、目标会话中该序号附近出现的阶段标记（按采样序对齐，非绝对时间对齐）。'
           : ''}
       </p>
-      <ResponsiveContainer width="100%" height={300}>
+      <ResponsiveContainer width="100%" height={300} debounce={200}>
         <LineChart data={data} margin={{ top: 8, right: 28, left: 8, bottom: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
           <XAxis dataKey="index" stroke="rgba(255,255,255,0.45)" fontSize={11} name="采样#" />
@@ -71,8 +71,8 @@ const CompareDataCharts: React.FC<CompareDataChartsProps> = ({
             formatter={(value: number, name: string) => [`${value.toFixed(1)} MB`, name]}
           />
           <Legend />
-          <Line type="monotone" dataKey="baseMB" name={baseLabel} stroke="#1890ff" dot={false} strokeWidth={2} />
-          <Line type="monotone" dataKey="targetMB" name={targetLabel} stroke="#fa8c16" dot={false} strokeWidth={2} />
+          <Line type="monotone" dataKey="baseMB" name={baseLabel} stroke="#1890ff" dot={false} strokeWidth={2} isAnimationActive={false} />
+          <Line type="monotone" dataKey="targetMB" name={targetLabel} stroke="#fa8c16" dot={false} strokeWidth={2} isAnimationActive={false} />
           {markRefs?.map((m, i) => (
             <ReferenceLine
               key={`${m.side}-${m.index}-${m.label}-${i}`}

@@ -1,12 +1,14 @@
-import React, { useEffect, useCallback, useState } from 'react'
+import React, { useEffect, useCallback, useState, useMemo } from 'react'
 import MetricCard from '../components/MetricCard'
 import ProcessTable from '../components/ProcessTable'
 import MemoryTrendChart from '../components/MemoryTrendChart'
+import ExternalPerfTrendCharts from '../components/ExternalPerfTrendCharts'
 import MemoryDistributionPie from '../components/MemoryDistributionPie'
 import SessionControl from '../components/SessionControl'
 import { useSession } from '../hooks/useSession'
 import { useToast } from '../context/ToastContext'
 import type { MemoryData } from '../hooks/useMemoryData'
+import type { MemorySnapshot } from '../types'
 import { formatKB, getEffectiveMemoryKB } from '../utils/format'
 
 const LAST_EXE_PATH_KEY = 'mmt_last_exe_path'
@@ -132,6 +134,36 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
     })()
   }, [])
 
+  /** 必须在任意 early return 之前调用，否则违反 Hooks 顺序规则 */
+  const externalRollup = useMemo(() => {
+    const externalMonitor = latestSnapshot?.monitorMode === 'external'
+    if (!externalMonitor) return null
+    const tail = snapshots.length > 400 ? snapshots.slice(-400) : snapshots
+    const pts = tail
+      .map((s) => s.externalMetrics)
+      .filter((x): x is NonNullable<MemorySnapshot['externalMetrics']> => Boolean(x))
+    if (pts.length === 0) return null
+    const rol = (values: number[]) => {
+      if (values.length === 0) return ''
+      const max = Math.max(...values)
+      const min = Math.min(...values)
+      const avg = values.reduce((a, b) => a + b, 0) / values.length
+      return `高 ${max.toFixed(1)} · 低 ${min.toFixed(1)} · 均 ${avg.toFixed(1)}`
+    }
+    const cpus = pts.map((p) => p.aggregateCpuPercent)
+    const reads = pts.map((p) => p.diskReadKBps)
+    const writes = pts.map((p) => p.diskWriteKBps)
+    const gpus = pts.map((p) => p.gpuEnginePercent).filter((x): x is number => x != null)
+    const vrams = pts.map((p) => p.gpuDedicatedMB).filter((x): x is number => x != null)
+    return {
+      cpu: rol(cpus),
+      dr: rol(reads),
+      dw: rol(writes),
+      gpu: gpus.length ? rol(gpus) : '',
+      vram: vrams.length ? rol(vrams) : '',
+    }
+  }, [latestSnapshot?.monitorMode, snapshots])
+
   if (!latestSnapshot) {
     return (
       <div className="mmt-loading">
@@ -165,6 +197,8 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
     0,
   )
 
+  const externalMetrics = latestSnapshot.externalMetrics
+
   return (
     <div className="mmt-dashboard">
       {/* 外部应用启动区（置顶） */}
@@ -173,7 +207,10 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         <p className="section-desc">
           输入要测试的 <strong>.exe</strong> 完整路径，点击「启动并监控」将启动该程序，并<strong>结束当前测试会话、新建一条会话</strong>。
           {externalMonitor ? (
-            <> 当前数据为<strong>该 exe 进程树</strong>（主进程 + 子进程），内存由 <strong>memory_native（C++）</strong> 的 QueryWorkingSetEx / GetProcessMemoryInfo 读取。</>
+            <>
+              当前数据为<strong>根 PID 子树内全部进程</strong>（含升级器等同目录子进程），内存与 CPU/磁盘由{' '}
+              <strong>memory_native（C++）</strong> 读取；GPU/显存为 PDH 性能计数器，按<strong>子树 PID</strong>过滤后与任务管理器「进程」列口径一致。
+            </>
           ) : (
             <> 未通过此处启动 exe 时，下方数据为<strong>本监控工具</strong>（当前 Electron）的进程内存。</>
           )}
@@ -234,6 +271,50 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         <MetricCard icon="🔢" title="进程数" value={`${latestSnapshot.processes.length}`} color="#8b8b8b" />
       </div>
 
+      {externalMonitor && externalMetrics ? (
+        <div className="mmt-metric-cards-row mmt-metric-cards-row-external">
+          <MetricCard
+            icon="📊"
+            title="CPU 合计（子树）"
+            value={`${externalMetrics.aggregateCpuPercent}%`}
+            detail={[externalRollup?.cpu, '相邻两拍差分，首拍为 0'].filter(Boolean).join('\n')}
+            color="#52c41a"
+          />
+          <MetricCard
+            icon="📀"
+            title="磁盘读取（子树）"
+            value={`${externalMetrics.diskReadKBps}`}
+            unit="KB/s"
+            detail={[externalRollup?.dr, 'GetProcessIoCounters 累计字节 ÷ 采样间隔'].filter(Boolean).join('\n')}
+            color="#faad14"
+          />
+          <MetricCard
+            icon="💾"
+            title="磁盘写入（子树）"
+            value={`${externalMetrics.diskWriteKBps}`}
+            unit="KB/s"
+            detail={[externalRollup?.dw, '同上'].filter(Boolean).join('\n')}
+            color="#eb2f96"
+          />
+          <MetricCard
+            icon="🎮"
+            title="GPU 引擎"
+            value={externalMetrics.gpuEnginePercent != null ? `${externalMetrics.gpuEnginePercent}` : '—'}
+            unit={externalMetrics.gpuEnginePercent != null ? '%' : undefined}
+            detail={externalRollup?.gpu || undefined}
+            color="#ff6b6b"
+          />
+          <MetricCard
+            icon="🧩"
+            title="GPU 显存"
+            value={externalMetrics.gpuDedicatedMB != null ? `${externalMetrics.gpuDedicatedMB}` : '—'}
+            unit={externalMetrics.gpuDedicatedMB != null ? 'MB' : undefined}
+            detail={externalRollup?.vram || undefined}
+            color="#9254de"
+          />
+        </div>
+      ) : null}
+
       {/* 图表行 */}
       <div className="charts-row">
         <div className="chart-container chart-wide">
@@ -251,7 +332,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
               </>
             )}
           </p>
-          <MemoryTrendChart snapshots={snapshots} height={320} />
+          <MemoryTrendChart snapshots={snapshots} marksSource={snapshots} height={320} />
         </div>
         <div className="chart-container chart-narrow">
           <h3>🥧 进程分布</h3>
@@ -265,12 +346,26 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         </div>
       </div>
 
+      {externalMonitor ? (
+        <section className="mmt-resource-section">
+          <h3 className="mmt-resource-section-title">🖥️ 资源性能趋势（CPU · 磁盘 · GPU）</h3>
+          <p className="chart-caption">
+            与上方指标卡同源；子树内全部 PID 汇总。首拍 CPU/磁盘速率为 0；GPU 引擎% / 专用显存为 PDH 中匹配子树 PID 的实例汇总（与任务管理器进程视图一致，受驱动影响可能有偏差）。
+          </p>
+          <ExternalPerfTrendCharts snapshots={snapshots} layout="featured" />
+        </section>
+      ) : (
+        <p className="mmt-self-monitor-hint chart-caption">
+          当前为<strong>自监控</strong>模式：仅展示本工具 Electron 内存曲线。若需 CPU/磁盘/GPU 进程树级趋势，请使用「启动并监控」外部 exe。
+        </p>
+      )}
+
       {/* 进程表格 */}
       <div className="section">
         <h3>📋 进程列表</h3>
         <p className="table-caption">
           {externalMonitor
-            ? '列出已启动 exe 进程树中的各进程（按内存降序）。「计入合计」决定该 PID 是否参与上方「进程树合计」汇总线；趋势图中各 PID 分线仍显示该进程实际占用。默认全选，可取消勾选误采样的进程。'
+            ? '列出根 PID 子树内全部进程（按内存降序）。「计入合计」影响进程树合计内存及 CPU/磁盘汇总卡片；各 PID 分线仍显示该进程实际占用与磁盘速率。默认全选。'
             : '列出本工具（Electron）各子进程内存占用，按内存降序排列。'}
         </p>
         {externalMonitor ? (

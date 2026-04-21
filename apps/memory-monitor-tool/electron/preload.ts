@@ -43,6 +43,10 @@ const api = {
   exportSession: (sessionId: string) =>
     ipcRenderer.invoke('export:session', sessionId),
 
+  /** 追加一行 NDJSON 到 userData/mmt-diag.log（与主进程 [MMT:diag] 同文件） */
+  diagAppend: (row: Record<string, unknown>) => ipcRenderer.send('diag:append', row),
+  getDiagLogPath: () => ipcRenderer.invoke('diag:get-log-path') as Promise<string | null>,
+
   // ---- 事件监听（主进程 -> 渲染进程） ----
   onSnapshotUpdate: (callback: (snapshot: unknown) => void) => {
     const handler = (_event: unknown, data: unknown) => callback(data)

@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import type { MemorySnapshot, ReportEventMark, TestSession, ReportSummary } from '../types'
 import { formatDuration, formatTime } from '../utils/format'
 import { collectReportEventMarksFromSnapshots } from '../utils/reportEventMarks'
 import { useToast } from '../context/ToastContext'
 import ReportDataCharts from '../components/ReportDataCharts'
+import { computeResourceSummaryFromDataPoints } from '../utils/reportResourceSummary'
 
 /**
  * 报告页面 - 面向测试的解读型报告
@@ -107,6 +108,12 @@ const ReportPage: React.FC = () => {
 
   const marksForTable =
     report != null && report.eventMarks !== undefined ? report.eventMarks : marksFallback
+
+  const resourceSummaryResolved = useMemo(() => {
+    if (!report) return null
+    if (report.resourceSummary) return report.resourceSummary
+    return computeResourceSummaryFromDataPoints(report.dataPoints) ?? null
+  }, [report])
 
   const conclusionConfig: Record<string, { label: string; color: string; icon: string }> = {
     PASS: { label: '通过', color: '#52c41a', icon: '✅' },
@@ -250,6 +257,102 @@ const ReportPage: React.FC = () => {
                 </div>
               </div>
 
+              {resourceSummaryResolved ? (
+                <div className="report-summary report-summary--resource">
+                  <h3>⚙️ 资源统计摘要（外部监控）</h3>
+                  <p className="chart-caption">
+                    与 dataPoints 中 ext* 字段一致：CPU/磁盘为<strong>子树汇总</strong>；GPU 为按子树 PID 过滤的 PDH 计数器。
+                    共 {resourceSummaryResolved.sampleCount} 个有效采样点参与统计。
+                  </p>
+                  <div className="summary-grid">
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.peakCpuPercent}%</span>
+                      <span className="summary-label">CPU 峰值（子树）</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.avgCpuPercent}%</span>
+                      <span className="summary-label">CPU 平均（子树）</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.finalCpuPercent}%</span>
+                      <span className="summary-label">CPU 末值（子树）</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.peakDiskReadKBps}</span>
+                      <span className="summary-label">磁盘读取峰值 KB/s</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.avgDiskReadKBps}</span>
+                      <span className="summary-label">磁盘读取平均 KB/s</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.finalDiskReadKBps}</span>
+                      <span className="summary-label">磁盘读取末值 KB/s</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.peakDiskWriteKBps}</span>
+                      <span className="summary-label">磁盘写入峰值 KB/s</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.avgDiskWriteKBps}</span>
+                      <span className="summary-label">磁盘写入平均 KB/s</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">{resourceSummaryResolved.finalDiskWriteKBps}</span>
+                      <span className="summary-label">磁盘写入末值 KB/s</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">
+                        {resourceSummaryResolved.peakGpuEnginePercent != null
+                          ? `${resourceSummaryResolved.peakGpuEnginePercent}%`
+                          : '—'}
+                      </span>
+                      <span className="summary-label">GPU 引擎峰值</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">
+                        {resourceSummaryResolved.avgGpuEnginePercent != null
+                          ? `${resourceSummaryResolved.avgGpuEnginePercent}%`
+                          : '—'}
+                      </span>
+                      <span className="summary-label">GPU 引擎平均</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">
+                        {resourceSummaryResolved.finalGpuEnginePercent != null
+                          ? `${resourceSummaryResolved.finalGpuEnginePercent}%`
+                          : '—'}
+                      </span>
+                      <span className="summary-label">GPU 引擎末值</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">
+                        {resourceSummaryResolved.peakGpuDedicatedMB != null
+                          ? `${resourceSummaryResolved.peakGpuDedicatedMB} MB`
+                          : '—'}
+                      </span>
+                      <span className="summary-label">GPU 显存峰值</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">
+                        {resourceSummaryResolved.avgGpuDedicatedMB != null
+                          ? `${resourceSummaryResolved.avgGpuDedicatedMB} MB`
+                          : '—'}
+                      </span>
+                      <span className="summary-label">GPU 显存平均</span>
+                    </div>
+                    <div className="summary-card">
+                      <span className="summary-value">
+                        {resourceSummaryResolved.finalGpuDedicatedMB != null
+                          ? `${resourceSummaryResolved.finalGpuDedicatedMB} MB`
+                          : '—'}
+                      </span>
+                      <span className="summary-label">GPU 显存末值</span>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+
               {report.externalTotalMemoryBasis && (
                 <div className="report-external-basis">
                   <h3>📎 进程树合计所依据的进程</h3>
@@ -294,6 +397,9 @@ const ReportPage: React.FC = () => {
               {/* 数据点预览 */}
               <div className="report-data-preview">
                 <h3>📉 数据采样预览（前20 / 后20 点）</h3>
+                {(() => {
+                  const hasExtPerf = report.dataPoints.some((d) => d.extCpuPercent !== undefined)
+                  return (
                 <table className="data-table">
                   <thead>
                     <tr>
@@ -304,6 +410,15 @@ const ReportPage: React.FC = () => {
                       <th>渲染(MB)</th>
                       <th>GPU(MB)</th>
                       <th>进程数</th>
+                      {hasExtPerf ? (
+                        <>
+                          <th>CPU%(计)</th>
+                          <th>读KB/s</th>
+                          <th>写KB/s</th>
+                          <th>GPU引擎%</th>
+                          <th>显存MB</th>
+                        </>
+                      ) : null}
                     </tr>
                   </thead>
                   <tbody>
@@ -318,11 +433,22 @@ const ReportPage: React.FC = () => {
                           <td>{pt.rendererMB}</td>
                           <td>{pt.gpuMB}</td>
                           <td>{pt.processCount}</td>
+                          {hasExtPerf ? (
+                            <>
+                              <td>{pt.extCpuPercent ?? '—'}</td>
+                              <td>{pt.extDiskReadKBps ?? '—'}</td>
+                              <td>{pt.extDiskWriteKBps ?? '—'}</td>
+                              <td>{pt.extGpuEnginePercent ?? '—'}</td>
+                              <td>{pt.extGpuDedicatedMB ?? '—'}</td>
+                            </>
+                          ) : null}
                         </tr>
                       )
                     })}
                   </tbody>
                 </table>
+                  )
+                })()}
               </div>
             </>
           ) : (

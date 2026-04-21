@@ -7,10 +7,11 @@
 //   - batchGetPrivateWorkingSet(pids[])
 //   - batchGetProcessMemory(pids[])
 //   - enumerateProcessTree(rootPid) — Toolhelp32 + QueryFullProcessImageName + NtQueryInformationProcess
+//   - batchGetProcessTimesAndIo(pids[]) — GetProcessTimes + GetProcessIoCounters（主进程算间隔速率）
+//   - queryGpuSystemSnapshotAsync([pids]) — Promise；PDH 采样 GPU；可选 PID 数组按实例名 pid_* 过滤（对齐任务管理器进程列）
 //
 // Built with N-API (node-addon-api) for ABI stability.
-
-#include <napi.h>
+// Windows 系统头必须在 napi.h 之前，否则 NTAPI 等宏可能与 node-addon-api 冲突。
 
 #ifdef _WIN32
 #include <windows.h>
@@ -22,13 +23,21 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
+#define PDH_LONG_VERSION
+#include <pdh.h>
+#include <pdhmsg.h>
+#include <cmath>
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "pdh.lib")
 
 #ifndef NT_SUCCESS
 #define NT_SUCCESS(Status) (((NTSTATUS)(Status)) >= 0)
 #endif
-#endif
+#endif  // _WIN32 includes only
+
+#include <napi.h>
 
 #ifdef _WIN32
 
@@ -122,50 +131,56 @@ static std::wstring QueryFullImagePath(HANDLE hProcess) {
   return std::wstring(buf, sz);
 }
 
-// Win10+：与任务管理器同源思路（NtQueryInformationProcess + 命令行信息类）
-static std::wstring QueryProcessCommandLine(HANDLE hProcess) {
+#ifndef STATUS_SUCCESS
+#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
+#endif
+
+/** Win8+：ProcessCommandLineInformation = 60，避免 Win32 宏与 QueryProcessCommandLine 命名冲突。 */
+#ifndef MY_PROCESS_COMMANDLINE_INFORMATION_CLASS
+#define MY_PROCESS_COMMANDLINE_INFORMATION_CLASS (60UL)
+#endif
+
+typedef struct _MY_PROCESS_COMMANDLINE_INFORMATION {
+  UNICODE_STRING CommandLine;
+} MY_PROCESS_COMMANDLINE_INFORMATION;
+
+/** 读取进程完整命令行（供 Chromium --type= 等解析）；失败返回空串。 */
+static std::wstring QueryProcessCommandLineWide(HANDLE hProcess) {
   typedef NTSTATUS(NTAPI* NtQueryInformationProcessFn)(
       HANDLE ProcessHandle,
-      PROCESSINFOCLASS ProcessInformationClass,
+      ULONG ProcessInformationClass,
       PVOID ProcessInformation,
       ULONG ProcessInformationLength,
       PULONG ReturnLength);
-
-  static NtQueryInformationProcessFn NtQueryInformationProcess =
-      reinterpret_cast<NtQueryInformationProcessFn>(
-          GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
-  if (!NtQueryInformationProcess) return std::wstring();
-
-  enum { kProcessCommandLineInformation = 60 };
-  unsigned char buffer[65536];
-  ULONG retLen = 0;
-  NTSTATUS st = NtQueryInformationProcess(
-      hProcess,
-      static_cast<PROCESSINFOCLASS>(kProcessCommandLineInformation),
-      buffer,
-      sizeof(buffer),
-      &retLen);
-  if (!NT_SUCCESS(st) || retLen < sizeof(USHORT) * 2) return std::wstring();
-
-  UNICODE_STRING* us = reinterpret_cast<UNICODE_STRING*>(buffer);
-  if (us->Length == 0 || us->Buffer == nullptr) return std::wstring();
-
-  const unsigned char* base = buffer;
-  const unsigned char* end = buffer + retLen;
-  const unsigned char* bp = reinterpret_cast<const unsigned char*>(us->Buffer);
-  if (bp >= base && bp < end) {
-    return std::wstring(us->Buffer, us->Length / sizeof(wchar_t));
+  static NtQueryInformationProcessFn pNtQIP = nullptr;
+  if (!pNtQIP) {
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (!ntdll) return std::wstring();
+    pNtQIP = reinterpret_cast<NtQueryInformationProcessFn>(GetProcAddress(ntdll, "NtQueryInformationProcess"));
+    if (!pNtQIP) return std::wstring();
   }
 
-  size_t wcharCount = us->Length / sizeof(wchar_t);
-  std::wstring out(wcharCount + 1, 0);
-  SIZE_T read = 0;
-  if (!ReadProcessMemory(hProcess, us->Buffer, &out[0], us->Length, &read)) return std::wstring();
-  out.resize(read / sizeof(wchar_t));
-  return out;
-}
+  constexpr ULONG kExtra = 65536;
+  std::vector<BYTE> buf(sizeof(MY_PROCESS_COMMANDLINE_INFORMATION) + kExtra);
+  ULONG retLen = 0;
+  NTSTATUS st = pNtQIP(
+      hProcess,
+      MY_PROCESS_COMMANDLINE_INFORMATION_CLASS,
+      buf.data(),
+      static_cast<ULONG>(buf.size()),
+      &retLen);
+  if (st != STATUS_SUCCESS || retLen < sizeof(UNICODE_STRING)) return std::wstring();
 
-#endif // _WIN32
+  auto* pci = reinterpret_cast<MY_PROCESS_COMMANDLINE_INFORMATION*>(buf.data());
+  USHORT nbytes = pci->CommandLine.Length;
+  if (nbytes == 0 || pci->CommandLine.Buffer == nullptr) return std::wstring();
+
+  const BYTE* base = buf.data();
+  const BYTE* end = base + buf.size();
+  const BYTE* str = reinterpret_cast<const BYTE*>(pci->CommandLine.Buffer);
+  if (str < base || str + nbytes > end) return std::wstring();
+  return std::wstring(reinterpret_cast<const wchar_t*>(str), nbytes / sizeof(wchar_t));
+}
 
 Napi::Value GetProcessMemoryDetailsNapi(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
@@ -262,6 +277,55 @@ Napi::Value BatchGetProcessMemoryNapi(const Napi::CallbackInfo& info) {
   return result;
 }
 
+static double FiletimeToDouble100ns(const FILETIME& ft) {
+  ULARGE_INTEGER u;
+  u.LowPart = ft.dwLowDateTime;
+  u.HighPart = ft.dwHighDateTime;
+  return static_cast<double>(u.QuadPart);
+}
+
+Napi::Value BatchGetProcessTimesAndIoNapi(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+#ifdef _WIN32
+  if (info.Length() < 1 || !info[0].IsArray()) {
+    Napi::TypeError::New(env, "Expected pids (number[])").ThrowAsJavaScriptException();
+    return env.Null();
+  }
+  Napi::Array pids = info[0].As<Napi::Array>();
+  Napi::Object result = Napi::Object::New(env);
+  uint32_t len = pids.Length();
+  for (uint32_t i = 0; i < len; i++) {
+    Napi::Value val = pids[i];
+    if (!val.IsNumber()) continue;
+    DWORD pid = val.As<Napi::Number>().Uint32Value();
+    if (pid == 0) continue;
+    void* ph;
+    ph = ::OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+    if (ph == nullptr) continue;
+    FILETIME tc, te, tk, tu;
+    IO_COUNTERS io;
+    BOOL okTimes = GetProcessTimes(static_cast<HANDLE>(ph), &tc, &te, &tk, &tu);
+    BOOL okIo = GetProcessIoCounters(static_cast<HANDLE>(ph), &io);
+    CloseHandle(static_cast<HANDLE>(ph));
+    if (!okTimes) continue;
+    Napi::Object o = Napi::Object::New(env);
+    o.Set("userTime100ns", Napi::Number::New(env, FiletimeToDouble100ns(tu)));
+    o.Set("kernelTime100ns", Napi::Number::New(env, FiletimeToDouble100ns(tk)));
+    if (okIo) {
+      o.Set("readBytes", Napi::Number::New(env, static_cast<double>(io.ReadTransferCount)));
+      o.Set("writeBytes", Napi::Number::New(env, static_cast<double>(io.WriteTransferCount)));
+    } else {
+      o.Set("readBytes", Napi::Number::New(env, 0.0));
+      o.Set("writeBytes", Napi::Number::New(env, 0.0));
+    }
+    result.Set(std::to_string(pid), o);
+  }
+  return result;
+#else
+  return Napi::Object::New(env);
+#endif
+}
+
 Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
 #ifdef _WIN32
@@ -277,6 +341,7 @@ Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
   if (snap == INVALID_HANDLE_VALUE) return out;
 
   std::unordered_map<DWORD, std::vector<DWORD>> children;
+  std::unordered_map<DWORD, DWORD> parentOf;
   std::unordered_map<DWORD, std::wstring> shortExe;
   PROCESSENTRY32W pe;
   pe.dwSize = sizeof(pe);
@@ -284,6 +349,7 @@ Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
     do {
       DWORD pid = pe.th32ProcessID;
       DWORD ppid = pe.th32ParentProcessID;
+      parentOf[pid] = ppid;
       children[ppid].push_back(pid);
       shortExe[pid] = pe.szExeFile;
     } while (Process32NextW(snap, &pe));
@@ -314,7 +380,7 @@ Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
     std::wstring cmdLine;
     if (h) {
       exePath = QueryFullImagePath(h);
-      cmdLine = QueryProcessCommandLine(h);
+      cmdLine = QueryProcessCommandLineWide(h);
       CloseHandle(h);
     }
     std::wstring shortName = shortExe.count(pid) ? shortExe[pid] : std::wstring();
@@ -325,8 +391,13 @@ Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
       else displayName = exePath;
     }
 
+    DWORD ppidOut = 0;
+    auto pit = parentOf.find(pid);
+    if (pit != parentOf.end()) ppidOut = pit->second;
+
     Napi::Object row = Napi::Object::New(env);
     row.Set("pid", Napi::Number::New(env, (double)pid));
+    row.Set("parentPid", Napi::Number::New(env, (double)ppidOut));
     row.Set("name", Napi::String::New(env, WideToUtf8(displayName)));
     row.Set("exePath", Napi::String::New(env, WideToUtf8(exePath)));
     row.Set("commandLine", Napi::String::New(env, WideToUtf8(cmdLine)));
@@ -338,13 +409,349 @@ Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
 #endif
 }
 
+static bool IsPdhValueUsable(DWORD status) {
+  return status == PDH_CSTATUS_VALID_DATA || status == PDH_CSTATUS_NEW_DATA;
+}
+
+static std::wstring LowerWide(std::wstring s) {
+  if (!s.empty()) {
+    ::CharLowerBuffW(&s[0], static_cast<DWORD>(s.size()));
+  }
+  return s;
+}
+
+/**
+ * 从 PDH 实例名中解析首个 pid_12345 形式的进程号（不区分大小写）。
+ * GPU Engine / GPU Process Memory 实例名通常含 pid_<decimal>。
+ */
+static DWORD TryExtractPidFromPdhInstanceName(const wchar_t* szName) {
+  if (!szName) return 0;
+  std::wstring s = LowerWide(std::wstring(szName));
+  const std::wstring key = L"pid_";
+  size_t pos = 0;
+  while ((pos = s.find(key, pos)) != std::wstring::npos) {
+    pos += key.length();
+    uint64_t val = 0;
+    size_t i = pos;
+    while (i < s.size() && s[i] >= L'0' && s[i] <= L'9') {
+      val = val * 10u + static_cast<uint64_t>(s[i] - L'0');
+      if (val > 0xFFFFFFFFull) {
+        val = 0;
+        break;
+      }
+      ++i;
+    }
+    if (i > pos && val >= 1ull) {
+      return static_cast<DWORD>(val);
+    }
+    pos = (i > pos ? i : pos + 1);
+  }
+  return 0;
+}
+
+static std::unordered_set<DWORD> MakePidSet(const std::vector<DWORD>& pids) {
+  return std::unordered_set<DWORD>(pids.begin(), pids.end());
+}
+
+/** 无 PID 过滤：取所有引擎实例的**最大值**，避免大量 0 实例把均值稀释成 0。 */
+static bool ReadGpuEngineUtilMax(PDH_HCOUNTER hCounter, double* outVal) {
+  DWORD bufSize = 0;
+  DWORD itemCount = 0;
+  PDH_STATUS st = PdhGetFormattedCounterArrayW(hCounter, PDH_FMT_DOUBLE, &bufSize, &itemCount, NULL);
+  if (st != PDH_MORE_DATA || bufSize == 0) return false;
+  std::vector<BYTE> buffer(bufSize);
+  auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+  st = PdhGetFormattedCounterArrayW(hCounter, PDH_FMT_DOUBLE, &bufSize, &itemCount, items);
+  if (st != ERROR_SUCCESS || itemCount == 0) return false;
+  double mx = -1;
+  DWORD n = 0;
+  for (DWORD i = 0; i < itemCount; ++i) {
+    if (!IsPdhValueUsable(items[i].FmtValue.CStatus)) continue;
+    double v = items[i].FmtValue.doubleValue;
+    if (!std::isnan(v) && v >= 0) {
+      mx = (n == 0) ? v : (v > mx ? v : mx);
+      ++n;
+    }
+  }
+  if (n == 0) return false;
+  *outVal = mx;
+  return true;
+}
+
+/**
+ * 子树 PID：按实例名解析出进程号；同一 PID 多实例取**最大**引擎%，再对子树内各 PID 求和（上限 100）。
+ * 避免同一进程多实例把 Dedicated/Util 重复相加接近整卡。
+ */
+static bool ReadGpuEngineUtilAggregatedForPids(PDH_HCOUNTER hCounter, const std::vector<DWORD>& pids, double* outVal) {
+  const std::unordered_set<DWORD> want = MakePidSet(pids);
+  DWORD bufSize = 0;
+  DWORD itemCount = 0;
+  PDH_STATUS st = PdhGetFormattedCounterArrayW(hCounter, PDH_FMT_DOUBLE, &bufSize, &itemCount, NULL);
+  if (st != PDH_MORE_DATA || bufSize == 0) return false;
+  std::vector<BYTE> buffer(bufSize);
+  auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+  st = PdhGetFormattedCounterArrayW(hCounter, PDH_FMT_DOUBLE, &bufSize, &itemCount, items);
+  if (st != ERROR_SUCCESS || itemCount == 0) return false;
+  std::unordered_map<DWORD, double> utilMaxPerPid;
+  for (DWORD i = 0; i < itemCount; ++i) {
+    if (!IsPdhValueUsable(items[i].FmtValue.CStatus)) continue;
+    DWORD apid = TryExtractPidFromPdhInstanceName(items[i].szName);
+    if (apid == 0 || want.count(apid) == 0) continue;
+    double v = items[i].FmtValue.doubleValue;
+    if (std::isnan(v) || v < 0) continue;
+    auto it = utilMaxPerPid.find(apid);
+    if (it == utilMaxPerPid.end() || v > it->second) utilMaxPerPid[apid] = v;
+  }
+  if (utilMaxPerPid.empty()) return false;
+  double sum = 0;
+  for (const auto& kv : utilMaxPerPid) sum += kv.second;
+  if (sum > 100.0) sum = 100.0;
+  *outVal = sum;
+  return true;
+}
+
+/** 整卡专用显存：多适配器实例取**最大**单列值，避免误加重复实例。 */
+static bool ReadGpuDedicatedBytesMax(PDH_HCOUNTER hCounter, double* outMaxBytes) {
+  DWORD bufSize = 0;
+  DWORD itemCount = 0;
+  PDH_STATUS st = PdhGetFormattedCounterArrayW(hCounter, PDH_FMT_LARGE, &bufSize, &itemCount, NULL);
+  if (st != PDH_MORE_DATA || bufSize == 0) return false;
+  std::vector<BYTE> buffer(bufSize);
+  auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+  st = PdhGetFormattedCounterArrayW(hCounter, PDH_FMT_LARGE, &bufSize, &itemCount, items);
+  if (st != ERROR_SUCCESS || itemCount == 0) return false;
+  double mx = -1;
+  DWORD n = 0;
+  for (DWORD i = 0; i < itemCount; ++i) {
+    if (!IsPdhValueUsable(items[i].FmtValue.CStatus)) continue;
+    LONGLONG lv = items[i].FmtValue.largeValue;
+    if (lv < 0) continue;
+    double v = static_cast<double>(lv);
+    mx = (n == 0) ? v : (v > mx ? v : mx);
+    ++n;
+  }
+  if (n == 0) return false;
+  *outMaxBytes = mx;
+  return true;
+}
+
+/**
+ * 子树：GPU Process Memory Dedicated 字节；按 PID 去重（同 PID 多实例取最大），再对子树内各 PID 相加。
+ * 对齐任务管理器「专用 GPU 内存」在进程组上的汇总，避免误加成整卡占用。
+ */
+static bool ReadGpuProcessDedicatedBytesAggregatedForPids(PDH_HCOUNTER hCounter, const std::vector<DWORD>& pids, double* outSumBytes) {
+  const std::unordered_set<DWORD> want = MakePidSet(pids);
+  DWORD bufSize = 0;
+  DWORD itemCount = 0;
+  PDH_STATUS st = PdhGetFormattedCounterArrayW(hCounter, PDH_FMT_LARGE, &bufSize, &itemCount, NULL);
+  if (st != PDH_MORE_DATA || bufSize == 0) return false;
+  std::vector<BYTE> buffer(bufSize);
+  auto* items = reinterpret_cast<PDH_FMT_COUNTERVALUE_ITEM_W*>(buffer.data());
+  st = PdhGetFormattedCounterArrayW(hCounter, PDH_FMT_LARGE, &bufSize, &itemCount, items);
+  if (st != ERROR_SUCCESS || itemCount == 0) return false;
+  std::unordered_map<DWORD, double> bytesMaxPerPid;
+  for (DWORD i = 0; i < itemCount; ++i) {
+    if (!IsPdhValueUsable(items[i].FmtValue.CStatus)) continue;
+    DWORD apid = TryExtractPidFromPdhInstanceName(items[i].szName);
+    if (apid == 0 || want.count(apid) == 0) continue;
+    LONGLONG lv = items[i].FmtValue.largeValue;
+    if (lv < 0) continue;
+    double v = static_cast<double>(lv);
+    auto it = bytesMaxPerPid.find(apid);
+    if (it == bytesMaxPerPid.end() || v > it->second) bytesMaxPerPid[apid] = v;
+  }
+  if (bytesMaxPerPid.empty()) return false;
+  double sum = 0;
+  for (const auto& kv : bytesMaxPerPid) sum += kv.second;
+  *outSumBytes = sum;
+  return true;
+}
+
+/**
+ * 两次 Collect 间隔 1s 再读数。
+ * - filterPids 为空：整机视角 —— 引擎% 取实例最大值；显存取适配器 Dedicated 峰值。
+ * - filterPids 非空：外部子树 —— 引擎% 对实例名含 pid_* 的项求和（上限 100）；显存用 GPU Process Memory 匹配 PID 求和。
+ */
+static void SampleGpuSystemPdh(
+    const std::vector<DWORD>& filterPids,
+    bool* outUtilOk,
+    bool* outMemOk,
+    double* outUtil,
+    double* outMemBytes) {
+  *outUtilOk = false;
+  *outMemOk = false;
+  *outUtil = NAN;
+  *outMemBytes = NAN;
+
+  PDH_HQUERY query = NULL;
+  PDH_HCOUNTER ctrUtil = NULL;
+  PDH_HCOUNTER ctrAdapterMem = NULL;
+  PDH_HCOUNTER ctrProcMem = NULL;
+
+  PDH_STATUS st = PdhOpenQueryA(NULL, 0, &query);
+  if (st != ERROR_SUCCESS) return;
+
+  st = PdhAddEnglishCounterA(query, "\\GPU Engine(*)\\Utilization Percentage", 0, &ctrUtil);
+  if (st != ERROR_SUCCESS) {
+    PdhCloseQuery(query);
+    return;
+  }
+
+  const bool subtree = !filterPids.empty();
+  if (subtree) {
+    st = PdhAddEnglishCounterA(query, "\\GPU Process Memory(*)\\Dedicated Usage", 0, &ctrProcMem);
+    if (st != ERROR_SUCCESS) ctrProcMem = NULL;
+  } else {
+    st = PdhAddEnglishCounterA(query, "\\GPU Adapter Memory(*)\\Dedicated Usage", 0, &ctrAdapterMem);
+    if (st != ERROR_SUCCESS) ctrAdapterMem = NULL;
+  }
+
+  st = PdhCollectQueryData(query);
+  if (st != ERROR_SUCCESS) {
+    PdhRemoveCounter(ctrUtil);
+    if (ctrAdapterMem) PdhRemoveCounter(ctrAdapterMem);
+    if (ctrProcMem) PdhRemoveCounter(ctrProcMem);
+    PdhCloseQuery(query);
+    return;
+  }
+
+  Sleep(1000);
+
+  st = PdhCollectQueryData(query);
+  if (st != ERROR_SUCCESS) {
+    PdhRemoveCounter(ctrUtil);
+    if (ctrAdapterMem) PdhRemoveCounter(ctrAdapterMem);
+    if (ctrProcMem) PdhRemoveCounter(ctrProcMem);
+    PdhCloseQuery(query);
+    return;
+  }
+
+  double u = NAN;
+  if (subtree) {
+    if (ReadGpuEngineUtilAggregatedForPids(ctrUtil, filterPids, &u)) {
+      *outUtilOk = true;
+      *outUtil = u;
+    } else if (ReadGpuEngineUtilMax(ctrUtil, &u)) {
+      /* 实例名无法解析 pid 时退化为整机「最忙引擎」峰值，避免一直 0 */
+      *outUtilOk = true;
+      *outUtil = u;
+    }
+  } else {
+    if (ReadGpuEngineUtilMax(ctrUtil, &u)) {
+      *outUtilOk = true;
+      *outUtil = u;
+    }
+  }
+
+  if (subtree && ctrProcMem) {
+    double m = NAN;
+    if (ReadGpuProcessDedicatedBytesAggregatedForPids(ctrProcMem, filterPids, &m)) {
+      *outMemOk = true;
+      *outMemBytes = m;
+    }
+    PdhRemoveCounter(ctrProcMem);
+  } else if (!subtree && ctrAdapterMem) {
+    double m = NAN;
+    if (ReadGpuDedicatedBytesMax(ctrAdapterMem, &m)) {
+      *outMemOk = true;
+      *outMemBytes = m;
+    }
+    PdhRemoveCounter(ctrAdapterMem);
+  }
+
+  PdhRemoveCounter(ctrUtil);
+  PdhCloseQuery(query);
+}
+
+class GpuPdhWorker : public Napi::AsyncWorker {
+ public:
+  GpuPdhWorker(Napi::Env env, std::vector<DWORD> filterPids)
+    : Napi::AsyncWorker(env, "mmtGpuPdh"),
+      deferred_(Napi::Promise::Deferred::New(env)),
+      filterPids_(std::move(filterPids)),
+      utilOk_(false),
+      memOk_(false),
+      util_(0),
+      memBytes_(0) {}
+
+  Napi::Promise GetPromise() { return deferred_.Promise(); }
+
+ protected:
+  void Execute() override {
+    SampleGpuSystemPdh(filterPids_, &utilOk_, &memOk_, &util_, &memBytes_);
+  }
+
+  void OnOK() override {
+    Napi::Env env = Env();
+    Napi::HandleScope hs(env);
+    Napi::Object o = Napi::Object::New(env);
+    if (utilOk_ && !std::isnan(util_) && util_ >= 0) {
+      double rounded = std::round(util_ * 10.0) / 10.0;
+      o.Set("engineUtilPercent", Napi::Number::New(env, rounded));
+    } else {
+      o.Set("engineUtilPercent", env.Null());
+    }
+    if (memOk_ && !std::isnan(memBytes_) && memBytes_ >= 0) {
+      double mb = std::round((memBytes_ / (1024.0 * 1024.0)) * 10.0) / 10.0;
+      o.Set("dedicatedUsedMB", Napi::Number::New(env, mb));
+    } else {
+      o.Set("dedicatedUsedMB", env.Null());
+    }
+    deferred_.Resolve(o);
+  }
+
+  void OnError(const Napi::Error& err) override { deferred_.Reject(err.Value()); }
+
+ private:
+  Napi::Promise::Deferred deferred_;
+  std::vector<DWORD> filterPids_;
+  bool utilOk_;
+  bool memOk_;
+  double util_;
+  double memBytes_;
+};
+
+Napi::Value QueryGpuSystemSnapshotAsyncNapi(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+#ifdef _WIN32
+  std::vector<DWORD> filterPids;
+  if (info.Length() >= 1 && info[0].IsArray()) {
+    Napi::Array arr = info[0].As<Napi::Array>();
+    uint32_t len = arr.Length();
+    for (uint32_t i = 0; i < len; ++i) {
+      Napi::Value v = arr.Get(i);
+      if (!v.IsNumber()) continue;
+      double d = v.As<Napi::Number>().DoubleValue();
+      if (d >= 1.0 && d <= 2147483647.0) {
+        filterPids.push_back(static_cast<DWORD>(d));
+      }
+    }
+  }
+  GpuPdhWorker* w = new GpuPdhWorker(env, std::move(filterPids));
+  Napi::Promise p = w->GetPromise();
+  w->Queue();
+  return p;
+#else
+  Napi::Promise::Deferred def = Napi::Promise::Deferred::New(env);
+  Napi::Object o = Napi::Object::New(env);
+  o.Set("engineUtilPercent", env.Null());
+  o.Set("dedicatedUsedMB", env.Null());
+  def.Resolve(o);
+  return def.Promise();
+#endif
+}
+
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("getProcessMemoryDetails", Napi::Function::New(env, GetProcessMemoryDetailsNapi));
   exports.Set("getPrivateWorkingSet", Napi::Function::New(env, GetPrivateWorkingSetNapi));
   exports.Set("batchGetPrivateWorkingSet", Napi::Function::New(env, BatchGetPrivateWorkingSetNapi));
   exports.Set("batchGetProcessMemory", Napi::Function::New(env, BatchGetProcessMemoryNapi));
   exports.Set("enumerateProcessTree", Napi::Function::New(env, EnumerateProcessTreeNapi));
+  exports.Set("batchGetProcessTimesAndIo", Napi::Function::New(env, BatchGetProcessTimesAndIoNapi));
+  exports.Set("queryGpuSystemSnapshotAsync", Napi::Function::New(env, QueryGpuSystemSnapshotAsyncNapi));
   return exports;
 }
 
 NODE_API_MODULE(memory_native, Init)
+
+#endif  // _WIN32
