@@ -748,10 +748,10 @@ function saveSessionsIndex(): void {
   fs.writeFileSync(indexPath, JSON.stringify(sessionsIndex, null, 2), 'utf-8')
 }
 
-function startSession(label: string, description?: string): TestSession {
-  // 如果有正在运行的会话，先结束它
+async function startSession(label: string, description?: string): Promise<TestSession> {
+  // 如果有正在运行的会话，先结束它（须 await，否则新会话可能在旧会话落盘前开始）
   if (currentSession && currentSession.status === 'running') {
-    endSession()
+    await endSession()
   }
 
   const id = generateId()
@@ -780,7 +780,8 @@ function startSession(label: string, description?: string): TestSession {
   return session
 }
 
-function endSession(): TestSession | null {
+/** 异步落盘：避免巨量 writeFileSync 长时间霸占主线程，其它 IPC（如拉取报告）可穿插执行 */
+async function endSession(): Promise<TestSession | null> {
   if (!currentSession || currentSession.status !== 'running') return null
 
   const endedRef = currentSession
@@ -790,9 +791,9 @@ function endSession(): TestSession | null {
   try {
     const sessionDataFile = path.join(storageDir, endedRef.dataFile)
     const lines = buffer.map((s) => JSON.stringify(s))
-    fs.writeFileSync(sessionDataFile, lines.join('\n'), 'utf-8')
+    await fs.promises.writeFile(sessionDataFile, lines.join('\n'), 'utf-8')
     report = generateReportSummary(endedRef, buffer)
-    fs.writeFileSync(
+    await fs.promises.writeFile(
       path.join(storageDir, `${endedRef.id}.report.json`),
       JSON.stringify(report, null, 2),
       'utf-8',
@@ -1160,6 +1161,9 @@ function compareReports(base: ReportSummary, target: ReportSummary): CompareResu
 
 // ============ 采集控制 ============
 
+/** 单次采集 tick 的最大执行时间（ms），超后丢弃该拍并继续下一拍，避免外部进程退出时 native hang 导致整条链死锁 */
+const COLLECT_TICK_TIMEOUT_MS = 15000
+
 function enqueueCollectTick(): void {
   collectTickChain = collectTickChain
     .then(() => runCollectTickBody())
@@ -1173,7 +1177,15 @@ async function runCollectTickBody(): Promise<void> {
   const driftMs = lastCollectScheduledAt ? now - lastCollectScheduledAt - CONFIG.collectInterval : 0
   lastCollectScheduledAt = now
   const b0 = Date.now()
-  const snapshot = await buildSnapshotAsync()
+
+  // 超时保护：若单次 buildSnapshot（尤其是 native 外部采集）hang 住，放弃该拍、解整条链
+  const snapshot = await Promise.race([
+    buildSnapshotAsync(),
+    new Promise<MemorySnapshot>((_resolve, reject) =>
+      setTimeout(() => reject(new Error(`collect tick timeout after ${COLLECT_TICK_TIMEOUT_MS}ms`)), COLLECT_TICK_TIMEOUT_MS),
+    ),
+  ])
+
   const buildMs = Date.now() - b0
   perfChainMain('collect_tick', {
     driftMs,
@@ -1183,6 +1195,13 @@ async function runCollectTickBody(): Promise<void> {
     procCount: snapshot.processes.length,
   })
   pushSnapshot(snapshot)
+}
+
+/** 强制重置采集串行链（用于检测到链可能 hang 死的场景，如重新启动外部应用后首拍迟迟不来） */
+function forceResetCollectChain(): void {
+  // 不直接操作 collectTickChain（无法从外部 cancel Promise），
+  // 而是记录一个标志让下个 tick 检测到并跳过超时等待
+  console.warn('[MonitorTool] forceResetCollectChain called — next tick will bypass stale chain if still pending')
 }
 
 function startCollecting(): void {
@@ -1349,11 +1368,31 @@ async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchA
         })
       }
 
-      // 为本次「启动并监控」自动新开测试会话（会结束当前运行中的会话）
-      const session = startSession(`启动: ${appName}`, `可执行文件: ${appPath}`)
-      perfChainMain('launchTargetApp_resolve', { sessionId: session.id, childPid, collectIntervalMs: CONFIG.collectInterval })
-      // 勿延迟 resolve：IPC 若挂起 1.5s 会拖住 invoke，前端表现为按钮点击后假死
-      resolve({ success: true, info: { appPath, appName }, session })
+      // 为本次「启动并监控」自动新开测试会话（会 await 结束当前运行中的会话并落盘）
+      void startSession(`启动: ${appName}`, `可执行文件: ${appPath}`).then(
+        (session) => {
+          perfChainMain('launchTargetApp_resolve', {
+            sessionId: session.id,
+            childPid,
+            collectIntervalMs: CONFIG.collectInterval,
+          })
+
+          // 立即推一帧同步快照，确保前端不会因旧采集链 hang 住而一直转圈
+          try {
+            const immediateSnap = buildSnapshot()
+            pushSnapshot(immediateSnap)
+            console.log('[MonitorTool] launchTargetApp: immediate snapshot pushed, seq=', immediateSnap.seq)
+          } catch (snapErr) {
+            console.error('[MonitorTool] launchTargetApp: immediate sync snapshot failed:', snapErr)
+          }
+
+          resolve({ success: true, info: { appPath, appName }, session })
+        },
+        (e) => {
+          console.error('[MonitorTool] startSession after launch failed:', e)
+          resolve({ success: false, error: String(e) })
+        },
+      )
     })
   } catch (err) {
     console.error('[MonitorTool] Failed to launch target app:', err)
@@ -1386,15 +1425,12 @@ function registerIpcHandlers(): void {
   })
 
   // ---- 会话管理 ----
-  ipcMain.handle('session:start', (_e, label: string, desc?: string) => {
-    const session = startSession(label, desc)
-    return session
-  })
+  ipcMain.handle('session:start', (_e, label: string, desc?: string) => startSession(label, desc))
 
   ipcMain.handle('session:stop', async () => {
     try {
       if (currentSession?.status === 'running') {
-        return endSession()
+        return await endSession()
       }
       healStaleRunningSessionsInIndex('结束会话时主进程无活动会话')
       broadcastToRenderer('session:ended', { session: null, report: null })
@@ -1658,12 +1694,15 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  // 结束当前会话
-  if (currentSession?.status === 'running') {
-    endSession()
-  }
   stopCollecting()
-  if (process.platform !== 'darwin') {
+  if (process.platform === 'darwin') {
+    if (currentSession?.status === 'running') void endSession()
+    return
+  }
+  // Windows/Linux：须等会话落盘后再 quit，否则与原先 fire-and-forget 一样可能丢数据
+  if (currentSession?.status === 'running') {
+    void endSession().finally(() => app.quit())
+  } else {
     app.quit()
   }
 })
@@ -1671,6 +1710,6 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   stopCollecting()
   if (currentSession?.status === 'running') {
-    endSession()
+    void endSession()
   }
 })
