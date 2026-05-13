@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { MemorySnapshot, ReportEventMark, TestSession, ReportSummary } from '../types'
 import { formatDuration, formatTime } from '../utils/format'
 import { collectReportEventMarksFromSnapshots } from '../utils/reportEventMarks'
@@ -17,6 +17,7 @@ const ReportPage: React.FC = () => {
   const [loading, setLoading] = useState(false)
   /** 旧版 report.json 无 eventMarks 时，从快照推导 */
   const [marksFallback, setMarksFallback] = useState<ReportEventMark[]>([])
+  const loadReportSeq = useRef(0)
   const { showToast } = useToast()
 
   const loadSessions = useCallback(async () => {
@@ -35,15 +36,17 @@ const ReportPage: React.FC = () => {
   }, [selectedId])
 
   const loadReport = useCallback(async (sessionId: string) => {
+    const seq = ++loadReportSeq.current
     setLoading(true)
     try {
-      const r = await window.monitorAPI.getSessionReport(sessionId) as ReportSummary | null
+      const r = (await window.monitorAPI.getSessionReport(sessionId)) as ReportSummary | null
+      if (seq !== loadReportSeq.current) return
       setReport(r)
     } catch (err) {
       console.error('[ReportPage] Failed to load report:', err)
-      showToast('加载报告失败', 'error')
+      if (seq === loadReportSeq.current) showToast('加载报告失败', 'error')
     } finally {
-      setLoading(false)
+      if (seq === loadReportSeq.current) setLoading(false)
     }
   }, [showToast])
 

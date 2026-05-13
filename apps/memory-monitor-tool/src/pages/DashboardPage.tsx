@@ -164,40 +164,8 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
     }
   }, [latestSnapshot?.monitorMode, snapshots])
 
-  if (!latestSnapshot) {
-    return (
-      <div className="mmt-loading">
-        <div className="loading-spinner"></div>
-        <p>正在连接内存采集服务...</p>
-        <p className="loading-hint">请确认当前有 Electron 应用在运行</p>
-      </div>
-    )
-  }
-
-  const externalMonitor = latestSnapshot.monitorMode === 'external'
-  const rootPid = latestSnapshot.externalRootPid
-  const externalIncludedPidsFallback = externalMonitor
-    ? latestSnapshot.externalTotalIncludedPids ?? latestSnapshot.processes.map((p) => p.pid)
-    : undefined
-  const includedPidSet = new Set(
-    externalIncludedPidsFallback ?? latestSnapshot.processes.map((p) => p.pid),
-  )
-  const browserProcess = externalMonitor && rootPid != null
-    ? latestSnapshot.processes.find((p) => p.pid === rootPid)
-    : latestSnapshot.processes.find((p) => p.type === 'Browser')
-  const rendererProcesses = externalMonitor && rootPid != null
-    ? latestSnapshot.processes.filter((p) => p.pid !== rootPid)
-    : latestSnapshot.processes.filter((p) => p.type === 'Tab')
-  const rendererProcessesInTotal =
-    externalMonitor && rootPid != null
-      ? rendererProcesses.filter((p) => includedPidSet.has(p.pid))
-      : rendererProcesses
-  const rendererIncludedMem = rendererProcessesInTotal.reduce(
-    (s, p) => s + getEffectiveMemoryKB(p.memory),
-    0,
-  )
-
-  const externalMetrics = latestSnapshot.externalMetrics
+  const snap = latestSnapshot
+  const externalMonitorForHint = snap?.monitorMode === 'external'
 
   return (
     <div className="mmt-dashboard">
@@ -206,7 +174,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         <h3>🎯 启动被监控的应用</h3>
         <p className="section-desc">
           输入要测试的 <strong>.exe</strong> 完整路径，点击「启动并监控」将启动该程序，并<strong>结束当前测试会话、新建一条会话</strong>。
-          {externalMonitor ? (
+          {externalMonitorForHint ? (
             <>
               当前数据为<strong>根 PID 子树内全部进程</strong>（含升级器等同目录子进程），内存与 CPU/磁盘由{' '}
               <strong>memory_native（C++）</strong> 读取；GPU/显存为 PDH 性能计数器，按<strong>子树 PID</strong>过滤后与任务管理器「进程」列口径一致。
@@ -246,12 +214,53 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         targetAppPath={displayTargetPath}
       />
 
+      {!snap ? (
+        <div className="mmt-waiting-first-snap">
+          <div className="loading-spinner" />
+          <p>正在等待首帧内存快照…</p>
+          <p className="loading-hint">
+            主进程首拍可能包含外部子树异步采集，需数秒属正常。此期间仍可使用上方「开始记录」、路径选择与「启动并监控」。
+          </p>
+        </div>
+      ) : null}
+
+      {snap
+        ? (() => {
+            const s = snap
+            const externalMonitor = s.monitorMode === 'external'
+            const rootPid = s.externalRootPid
+            const externalIncludedPidsFallback = externalMonitor
+              ? s.externalTotalIncludedPids ?? s.processes.map((p) => p.pid)
+              : undefined
+            const includedPidSet = new Set(
+              externalIncludedPidsFallback ?? s.processes.map((p) => p.pid),
+            )
+            const browserProcess =
+              externalMonitor && rootPid != null
+                ? s.processes.find((p) => p.pid === rootPid)
+                : s.processes.find((p) => p.type === 'Browser')
+            const rendererProcesses =
+              externalMonitor && rootPid != null
+                ? s.processes.filter((p) => p.pid !== rootPid)
+                : s.processes.filter((p) => p.type === 'Tab')
+            const rendererProcessesInTotal =
+              externalMonitor && rootPid != null
+                ? rendererProcesses.filter((p) => includedPidSet.has(p.pid))
+                : rendererProcesses
+            const rendererIncludedMem = rendererProcessesInTotal.reduce(
+              (acc, p) => acc + getEffectiveMemoryKB(p.memory),
+              0,
+            )
+            const externalMetrics = s.externalMetrics
+
+            return (
+              <>
       {/* 指标卡片 - 面向测试的简化指标 */}
       <div className="mmt-metric-cards-row">
         <MetricCard
           icon="💻"
           title={externalMonitor ? '进程树合计' : '总内存'}
-          value={formatKB(latestSnapshot.totalWorkingSetSize)}
+          value={formatKB(s.totalWorkingSetSize)}
           color="#646cff"
         />
         <MetricCard
@@ -263,12 +272,12 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         <MetricCard
           icon="🖼️"
           title={externalMonitor ? '计入合计的子进程' : '渲染进程'}
-          value={formatKB(externalMonitor ? rendererIncludedMem : rendererProcesses.reduce((s, p) => s + getEffectiveMemoryKB(p.memory), 0))}
+          value={formatKB(externalMonitor ? rendererIncludedMem : rendererProcesses.reduce((acc, p) => acc + getEffectiveMemoryKB(p.memory), 0))}
           unit={`(${externalMonitor ? rendererProcessesInTotal.length : rendererProcesses.length}个)`}
           color="#61dafb"
         />
-        <MetricCard icon="⚙️" title="系统内存" value={`${latestSnapshot.system.usagePercent}%`} color="#ff6b6b" />
-        <MetricCard icon="🔢" title="进程数" value={`${latestSnapshot.processes.length}`} color="#8b8b8b" />
+        <MetricCard icon="⚙️" title="系统内存" value={`${s.system.usagePercent}%`} color="#ff6b6b" />
+        <MetricCard icon="🔢" title="进程数" value={`${s.processes.length}`} color="#8b8b8b" />
       </div>
 
       {externalMonitor && externalMetrics ? (
@@ -338,7 +347,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
           <h3>🥧 进程分布</h3>
           <p className="chart-caption">各类型进程的内存占比</p>
           <MemoryDistributionPie
-            processes={latestSnapshot.processes}
+            processes={s.processes}
             height={300}
             externalMonitor={externalMonitor}
             externalTotalIncludedPids={externalIncludedPidsFallback}
@@ -379,12 +388,17 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
           </div>
         ) : null}
         <ProcessTable
-          processes={latestSnapshot.processes}
+          processes={s.processes}
           externalMonitor={externalMonitor}
           externalTotalIncludedPids={externalIncludedPidsFallback}
           onTogglePidInTotal={externalMonitor ? handleTogglePidInTotal : undefined}
         />
       </div>
+
+              </>
+            )
+          })()
+        : null}
 
       {/* 测试提示 */}
       <div className="section mmt-test-tips">
