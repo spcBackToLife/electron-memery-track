@@ -28,6 +28,7 @@ const formatTime = (ts: number): string => {
 
 const COLORS = {
   total: '#646cff',
+  privateBytes: '#b37feb',
   browser: '#f5a623',
   renderer: '#61dafb',
   gpu: '#ff6b6b',
@@ -105,6 +106,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, marksSou
           timestamp: s.timestamp,
           timeLabel: formatTime(s.timestamp),
           total: Math.round((s.totalWorkingSetSize / 1024) * 10) / 10,
+          totalPrivateBytes: Math.round(((s.totalPrivateBytes ?? 0) / 1024) * 10) / 10,
           browser: Math.round((browserMem / 1024) * 10) / 10,
           renderer: Math.round((rendererMem / 1024) * 10) / 10,
           gpu: Math.round((gpuMem / 1024) * 10) / 10,
@@ -145,6 +147,7 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, marksSou
         timestamp: s.timestamp,
         timeLabel: formatTime(s.timestamp),
         total: Math.round((s.totalWorkingSetSize / 1024) * 10) / 10,
+        totalPrivateBytes: Math.round(((s.totalPrivateBytes ?? 0) / 1024) * 10) / 10,
         browser: 0,
         renderer: 0,
         gpu: 0,
@@ -234,6 +237,16 @@ const MemoryTrendChart: React.FC<MemoryTrendChartProps> = ({ snapshots, marksSou
           stroke={COLORS.total}
           dot={false}
           strokeWidth={2}
+          isAnimationActive={false}
+        />
+        <Line
+          type="monotone"
+          dataKey="totalPrivateBytes"
+          name={hideElectronDetailLines ? '专用提交合计' : '总专用提交'}
+          stroke={COLORS.privateBytes}
+          dot={false}
+          strokeWidth={1.75}
+          strokeDasharray="6 4"
           isAnimationActive={false}
         />
         {hideElectronDetailLines && externalSeries

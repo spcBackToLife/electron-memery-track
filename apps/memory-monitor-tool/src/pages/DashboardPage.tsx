@@ -11,7 +11,57 @@ import type { MemoryData } from '../hooks/useMemoryData'
 import type { MemorySnapshot } from '../types'
 import { formatKB, getEffectiveMemoryKB } from '../utils/format'
 
-const LAST_EXE_PATH_KEY = 'mmt_last_exe_path'
+/** Format bytes to human-readable string */
+function fmtMem(kb: number): string {
+  if (kb <= 0) return '—'
+  const mb = kb / 1024
+  if (mb < 1024) return `${mb.toFixed(0)} MB`
+  return `${(mb / 1024).toFixed(1)} GB`
+}
+
+/** Extract short display name from full exe path: "Game.exe" or "folder\Game.exe" */
+function shortExeName(fullPath: string): string {
+  if (!fullPath) return '—'
+  // Remove quotes if present
+  let p = fullPath.replace(/^"|"$/g, '')
+  // Get just the filename
+  const lastSlash = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'))
+  const filename = lastSlash >= 0 ? p.slice(lastSlash + 1) : p
+  // If filename looks like it has no extension, check if this is actually a command line
+  if (filename.includes(' ') || filename.includes('--') || filename.length > 40) {
+    // Try to extract actual exe from command-line-like string
+    const exeMatch = p.match(/([A-Za-z]:\\[^"]*?\.(?:exe|EXE))/)
+    if (exeMatch) {
+      const exePath = exeMatch[1]
+      const ls = Math.max(exePath.lastIndexOf('\\'), exePath.lastIndexOf('/'))
+      const fn = ls >= 0 ? exePath.slice(ls + 1) : exePath
+      return fn
+    }
+    return filename.length > 40 ? filename.slice(0, 38) + '..' : filename
+  }
+  return filename
+}
+
+/** Extract parent folder name for context */
+function parentFolder(fullPath: string): string {
+  if (!fullPath) return ''
+  let p = fullPath.replace(/^"|"$/g, '')
+  const lastSlash = Math.max(p.lastIndexOf('\\'), p.lastIndexOf('/'))
+  if (lastSlash < 0) return ''
+  const parentPart = p.slice(0, lastSlash)
+  const prevSlash = Math.max(parentPart.lastIndexOf('\\'), parentPart.lastIndexOf('/'))
+  return prevSlash >= 0 ? parentPart.slice(prevSlash + 1) : parentPart
+}
+
+/** 系统进程列表项（来自 C++ enumerateAllProcesses） */
+interface ProcessListItem {
+  pid: number
+  parentPid: number
+  name: string
+  exePath: string
+  /** Private Working Set (KB) — 与任务管理器"内存"列一致 */
+  privateWorkingSetKB: number
+}
 
 interface DashboardPageProps {
   memoryData: MemoryData
@@ -34,27 +84,135 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
   } = useSession()
 
   const { showToast } = useToast()
-  const [targetAppPath, setTargetAppPath] = useState('')
-  /** 主进程记录的最近一次「启动并监控」目标（刷新页面后仍可拉取） */
-  const [displayTargetPath, setDisplayTargetPath] = useState<string | null>(null)
 
-  const persistLastExePath = useCallback((p: string) => {
+  // ---- 进程搜索选择器状态 ----
+  const [processList, setProcessList] = useState<ProcessListItem[]>([])
+  const [searchQuery, setSearchQuery] = useState('')
+  const [isFetchingProcesses, setIsFetchingProcesses] = useState(false)
+  const [selectedPid, setSelectedPid] = useState<number | null>(null)
+  const [displayTargetInfo, setDisplayTargetInfo] = useState<string | null>(null)
+  const [showProcessList, setShowProcessList] = useState(false)
+  const [sessionLabel, setSessionLabel] = useState('')
+
+  /** 拉取系统全部进程列表（C++ Toolhelp32） */
+  const fetchProcessList = useCallback(async () => {
+    setIsFetchingProcesses(true)
     try {
-      if (p.trim()) localStorage.setItem(LAST_EXE_PATH_KEY, p.trim())
-    } catch {
-      /* ignore */
+      const raw = await window.monitorAPI.listAllProcesses()
+      const list = (raw as Array<Record<string, unknown>>)
+        .map((item) => ({
+          pid: typeof item.pid === 'number' ? item.pid : Number(item.pid),
+          parentPid: typeof item.parentPid === 'number' ? item.parentPid : 0,
+          name: typeof item.name === 'string' ? item.name : '',
+          exePath: typeof item.exePath === 'string' ? item.exePath : '',
+          privateWorkingSetKB: typeof item.privateWorkingSetKB === 'number' ? item.privateWorkingSetKB : 0,
+        }))
+        .filter((p) => p.pid > 0 && p.name)
+        .sort((a, b) => b.privateWorkingSetKB - a.privateWorkingSetKB)
+      setProcessList(list)
+      if (list.length > 0) setShowProcessList(true)
+    } catch (err) {
+      console.error('获取进程列表失败:', err)
+      showToast('获取进程列表失败，请检查 C++ 原生模块是否已加载', 'error')
+      setProcessList([])
+    } finally {
+      setIsFetchingProcesses(false)
     }
-  }, [])
+  }, [showToast])
 
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(LAST_EXE_PATH_KEY)
-      if (saved) setTargetAppPath(saved)
-    } catch {
-      /* ignore */
+  /** 过滤后的进程列表 */
+  const filteredProcesses = useMemo(() => {
+    if (!searchQuery.trim()) return processList
+    const q = searchQuery.toLowerCase().trim()
+    return processList.filter((p) =>
+      p.name.toLowerCase().includes(q) ||
+      p.exePath.toLowerCase().includes(q) ||
+      String(p.pid).includes(q),
+    )
+  }, [processList, searchQuery])
+
+  /**
+   * Process tree analysis: identify root vs child, compute child counts and family memory.
+   * Returns enriched items sorted: roots first (by total family memory), then children.
+   */
+  interface EnrichedProcessItem extends ProcessListItem {
+    isRoot: boolean
+    childCount: number       /* direct + indirect children within the filtered set */
+    familyPrivateKB: number  /* sum of this PID + all its descendants' privateWorkingSetKB */
+    depth: number            /* 0 for root, 1+ for children */
+    rootPid: number          /* the root PID of this process's tree */
+  }
+
+  const enrichedProcesses = useMemo((): EnrichedProcessItem[] => {
+    const list = filteredProcesses
+    const pidSet = new Set(list.map((p) => p.pid))
+
+    // Build parent -> children map (within full processList for accurate ancestry)
+    const childrenMap = new Map<number, number[]>() // parentPid -> [childPids]
+    for (const p of list) {
+      if (!childrenMap.has(p.parentPid)) childrenMap.set(p.parentPid, [])
+      childrenMap.get(p.parentPid)!.push(p.pid)
     }
-  }, [])
 
+    // Count all descendants (BFS)
+    function countDescendants(pid: number): number {
+      const kids = childrenMap.get(pid) || []
+      let n = kids.length
+      for (const k of kids) n += countDescendants(k)
+      return n
+    }
+
+    // Sum private KB of all descendants
+    function sumFamilyMemory(pid: number): number {
+      const proc = list.find((p) => p.pid === pid)
+      let total = proc ? proc.privateWorkingSetKB : 0
+      for (const kid of (childrenMap.get(pid) || [])) {
+        total += sumFamilyMemory(kid)
+      }
+      return total
+    }
+
+    // Find depth and root for each process
+    function getDepthAndRoot(
+      pid: number,
+      visited: Set<number> = new Set(),
+    ): { depth: number; rootPid: number } {
+      if (visited.has(pid)) return { depth: 0, rootPid: pid } // cycle guard
+      visited.add(pid)
+      const proc = list.find((p) => p.pid === pid)
+      if (!proc || proc.parentPid === 0 || !pidSet.has(proc.parentPid)) {
+        return { depth: 0, rootPid: pid }
+      }
+      const parent = getDepthAndRoot(proc.parentPid, visited)
+      return { depth: parent.depth + 1, rootPid: parent.rootPid }
+    }
+
+    const enriched: EnrichedProcessItem[] = list.map((proc) => {
+      const isRoot = proc.parentPid === 0 || !pidSet.has(proc.parentPid)
+      const childCount = isRoot ? countDescendants(proc.pid) : 0
+      const familyKB = isRoot ? sumFamilyMemory(proc.pid) : proc.privateWorkingSetKB
+      const { depth, rootPid } = getDepthAndRoot(proc.pid)
+      return { ...proc, isRoot, childCount, familyPrivateKB: familyKB, depth, rootPid }
+    })
+
+    // Sort: roots first by family memory desc, then children indented under their root
+    const roots = enriched.filter((e) => e.isRoot).sort((a, b) => b.familyPrivateKB - a.familyPrivateKB)
+    const children = enriched.filter((e) => !e.isRoot).sort((a, b) => b.privateWorkingSetKB - a.privateWorkingSetKB)
+
+    // Interleave: root followed by its immediate children (sorted by memory)
+    const ordered: EnrichedProcessItem[] = []
+    for (const root of roots) {
+      ordered.push(root)
+      const rootChildren = children
+        .filter((c) => c.rootPid === root.pid)
+        .sort((a, b) => b.privateWorkingSetKB - a.privateWorkingSetKB)
+      ordered.push(...rootChildren)
+    }
+
+    return ordered
+  }, [filteredProcesses])
+
+  // ---- 会话控制回调 ----
   const handleStartSession = useCallback(async (label: string) => {
     await startSessionFromHook(label)
     showToast(`测试会话已开始：${label}`, 'success')
@@ -70,36 +228,53 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
     showToast(`已添加标记：${label}`, 'info')
   }, [addMark, showToast])
 
-  // 启动外部应用进行监控（主进程会结束当前会话并自动新开一条测试会话）
-  const handleLaunchApp = useCallback(async () => {
-    if (!targetAppPath.trim()) return
+  // ---- 附加到已有进程 ----
+  const handleAttachToProcess = useCallback(async () => {
+    if (selectedPid == null || selectedPid <= 0) return
     try {
-      const result = await window.monitorAPI.launchApp(targetAppPath.trim())
+      const result = await window.monitorAPI.attachToProcess(selectedPid, sessionLabel || undefined)
       if (result.success && result.info) {
-        setDisplayTargetPath(result.info.appPath)
-        persistLastExePath(result.info.appPath)
-        showToast(`已启动并已新建测试会话：${result.info.appName}`, 'success')
+        setDisplayTargetInfo(`${result.info.appName} (PID ${result.info.pid})`)
+        setSearchQuery('')
+        setShowProcessList(false)
+        setSelectedPid(null)
+        setSessionLabel('')
+        showToast(`已附加到进程：${result.info.appName} (PID ${result.info.pid})，监控已启动`, 'success')
       } else {
-        showToast(result.error || '启动失败，请检查应用路径', 'error')
+        showToast(result.error || '附加进程失败', 'error')
       }
     } catch (err) {
       console.error(err)
-      showToast(`启动失败: ${err instanceof Error ? err.message : String(err)}`, 'error')
+      showToast(`附加失败: ${err instanceof Error ? err.message : String(err)}`, 'error')
     }
-  }, [targetAppPath, showToast, persistLastExePath])
+  }, [selectedPid, sessionLabel, showToast])
 
-  const handlePickExecutable = useCallback(async () => {
-    try {
-      const r = await window.monitorAPI.pickExecutable()
-      if (r.canceled) return
-      setTargetAppPath(r.path)
-      persistLastExePath(r.path)
-    } catch (e) {
-      console.error(e)
-      showToast('选择文件失败', 'error')
-    }
-  }, [persistLastExePath, showToast])
+  /** 选择进程（高亮） */
+  const handleSelectProcess = useCallback((pid: number) => {
+    setSelectedPid(pid)
+  }, [])
 
+  /** 进程列表中双击直接附加 */
+  const handleDoubleClickAttach = useCallback((pid: number) => {
+    setSelectedPid(pid)
+    // 延迟一 tick 让 selectedPid 更新后再 attach
+    setTimeout(() => {
+      void window.monitorAPI.attachToProcess(pid, sessionLabel || undefined).then((result) => {
+        if (result.success && result.info) {
+          setDisplayTargetInfo(`${result.info.appName} (PID ${result.info.pid})`)
+          setSearchQuery('')
+          setShowProcessList(false)
+          setSelectedPid(null)
+          setSessionLabel('')
+          showToast(`已附加到进程：${result.info.appName}`, 'success')
+        } else {
+          showToast(result.error || '附加失败', 'error')
+        }
+      })
+    }, 0)
+  }, [sessionLabel, showToast])
+
+  // ---- 原有 PID 排除逻辑 ----
   const handleTogglePidInTotal = useCallback(async (pid: number, excluded: boolean) => {
     try {
       await window.monitorAPI.setPidExcludedFromTotal(pid, excluded)
@@ -123,16 +298,26 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
     void refreshSessions()
   }, [refreshSessions])
 
+  /** 会话结束后主进程已 detach，同步清空 UI 上的「当前正在监控」文案 */
   useEffect(() => {
+    if (!isRunning) {
+      setDisplayTargetInfo(null)
+    }
+  }, [isRunning])
+
+  useEffect(() => {
+    if (!isRunning) return
     void (async () => {
       try {
         const t = await window.monitorAPI.getTargetApp()
-        if (t?.appPath) setDisplayTargetPath(t.appPath)
+        if (t?.appPath) {
+          setDisplayTargetInfo(`${t.appName} (PID —)`)
+        }
       } catch {
         /* ignore */
       }
     })()
-  }, [])
+  }, [isRunning])
 
   /** 必须在任意 early return 之前调用，否则违反 Hooks 顺序规则 */
   const externalRollup = useMemo(() => {
@@ -148,7 +333,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
       const max = Math.max(...values)
       const min = Math.min(...values)
       const avg = values.reduce((a, b) => a + b, 0) / values.length
-      return `高 ${max.toFixed(1)} · 低 ${min.toFixed(1)} · 均 ${avg.toFixed(1)}`
+      return `${max.toFixed(1)} / ${min.toFixed(1)} / ${avg.toFixed(1)}`
     }
     const cpus = pts.map((p) => p.aggregateCpuPercent)
     const reads = pts.map((p) => p.diskReadKBps)
@@ -165,42 +350,160 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
   }, [latestSnapshot?.monitorMode, snapshots])
 
   const snap = latestSnapshot
-  const externalMonitorForHint = snap?.monitorMode === 'external'
+  /** 仅在有进行中的会话且最新快照为外部模式时提示，避免结束会话后仍显示旧 PID */
+  const externalMonitorForHint = isRunning && snap?.monitorMode === 'external'
 
   return (
     <div className="mmt-dashboard">
-      {/* 外部应用启动区（置顶） */}
+      {/* 进程附加区（置顶） */}
       <div className="mmt-launch-section">
-        <h3>🎯 启动被监控的应用</h3>
+        <h3>选择要监控的应用</h3>
         <p className="section-desc">
-          输入要测试的 <strong>.exe</strong> 完整路径，点击「启动并监控」将启动该程序，并<strong>结束当前测试会话、新建一条会话</strong>。
+          搜索并选择系统中<strong>正在运行</strong>的进程，点击「附加并监控」将对该进程及其子树进行内存/CPU/GPU 监控。
+          数据由{' '}
+          <strong>memory_native（C++ / Win32 API）</strong>{' '}
+          实时采集，无需启动新实例。
+          「内存」列为<strong>专用工作集</strong>（对齐任务管理器「内存」）；进程表另有<strong>专用提交</strong>（privateBytes /
+          PrivateUsage），通常更大。趋势图与合计卡片同时展示两条曲线/数值便于对比。
           {externalMonitorForHint ? (
             <>
-              当前数据为<strong>根 PID 子树内全部进程</strong>（含升级器等同目录子进程），内存与 CPU/磁盘由{' '}
-              <strong>memory_native（C++）</strong> 读取；GPU/显存为 PDH 性能计数器，按<strong>子树 PID</strong>过滤后与任务管理器「进程」列口径一致。
+              {' '}当前正在监控：<strong>{displayTargetInfo || snap?.externalRootPid}</strong>。
             </>
           ) : (
-            <> 未通过此处启动 exe 时，下方数据为<strong>本监控工具</strong>（当前 Electron）的进程内存。</>
+            <> 未附加外部进程时，下方数据为本监控工具自身。</>
           )}
         </p>
-        <div className="launch-form-row">
+
+        {/* 搜索 + 刷新 + 附件按钮 */}
+        <div className="process-selector-row">
+          <div className="process-search-input-wrap">
+            <input
+              type="text"
+              className="process-search-input"
+              placeholder="输入进程名、路径或 PID 搜索…"
+              value={searchQuery}
+              onChange={(e) => {
+                setSearchQuery(e.target.value)
+                if (!showProcessList && processList.length > 0) setShowProcessList(true)
+              }}
+              onFocus={() => {
+                if (processList.length > 0) setShowProcessList(true)
+                else void fetchProcessList()
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && filteredProcesses.length > 0) {
+                  handleSelectProcess(filteredProcesses[0].pid)
+                  setShowProcessList(true)
+                }
+              }}
+            />
+            {searchQuery && (
+              <button
+                className="process-search-clear"
+                type="button"
+                onClick={() => { setSearchQuery(''); setSelectedPid(null) }}
+              >
+                x
+              </button>
+            )}
+          </div>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => void fetchProcessList()}
+            disabled={isFetchingProcesses}
+          >
+            {isFetchingProcesses ? '刷新中...' : '刷新进程列表'}
+          </button>
           <input
             type="text"
-            placeholder="应用路径 (如 D:\app\my-electron-app.exe)"
-            value={targetAppPath}
-            onChange={(e) => setTargetAppPath(e.target.value)}
-            onBlur={() => {
-              if (targetAppPath.trim()) persistLastExePath(targetAppPath.trim())
-            }}
-            onKeyDown={(e) => e.key === 'Enter' && handleLaunchApp()}
+            className="process-session-input"
+            placeholder="会话名称（可选）"
+            value={sessionLabel}
+            onChange={(e) => setSessionLabel(e.target.value)}
           />
-          <button type="button" className="btn btn-secondary" onClick={() => void handlePickExecutable()}>
-            📂 浏览…
-          </button>
-          <button className="btn btn-primary" onClick={handleLaunchApp} disabled={!targetAppPath.trim()}>
-            🚀 启动并监控
+          <button
+            className="btn btn-primary"
+            onClick={handleAttachToProcess}
+            disabled={selectedPid == null}
+          >
+            附加并监控{selectedPid != null ? ` (PID ${selectedPid})` : ''}
           </button>
         </div>
+
+        {/* 进程下拉列表 */}
+        {showProcessList && (
+          <div className="process-list-dropdown">
+            {filteredProcesses.length === 0 ? (
+              <div className="process-list-empty">
+                {isFetchingProcesses ? '正在从 C++ 枚举系统进程...' : '无匹配进程'}
+              </div>
+            ) : (
+              <table className="process-list-table">
+                <thead>
+                  <tr>
+                    <th className="col-pid">PID</th>
+                    <th className="col-name">进程名</th>
+                    <th className="col-path">所在目录</th>
+                    <th className="col-mem">专用内存</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {enrichedProcesses.filter((e) => e.isRoot).slice(0, 200).map((proc) => {
+                    const isSelected = selectedPid === proc.pid
+                    const displayName = shortExeName(proc.name || proc.exePath)
+                    const folder = parentFolder(proc.exePath)
+                    const isRoot = proc.isRoot
+                    return (
+                      <tr
+                        key={proc.pid}
+                        className={`${isSelected ? 'selected' : ''} ${isRoot ? 'row-root' : 'row-child'}`}
+                        style={{ '--indent-px': `${(proc.depth || 0) * 20}px` } as React.CSSProperties}
+                        onClick={() => handleSelectProcess(proc.pid)}
+                        onDoubleClick={() => handleDoubleClickAttach(proc.pid)}
+                        title={`${isRoot ? '[主进程]' : '[子进程]'} 双击快速附加\nPID: ${proc.pid}\n父进程: PPID ${proc.parentPid}\n完整路径: ${proc.exePath}\n专用内存: ${fmtMem(proc.privateWorkingSetKB)}${isRoot && proc.childCount > 0 ? `\n包含 ${proc.childCount} 个子进程 (合计 ${fmtMem(proc.familyPrivateKB)})` : ''}`}
+                      >
+                        <td className="col-pid">
+                          {isRoot && proc.childCount > 0 && (
+                            <span className="root-badge" title={`主进程，包含 ${proc.childCount} 个子进程`}>ROOT</span>
+                          )}
+                          {proc.pid}
+                        </td>
+                        <td className="col-name">
+                          <span className={`proc-name-main ${isRoot ? 'root-name' : ''}`}>{displayName}</span>
+                          {isRoot && proc.childCount > 0 && (
+                            <span className="proc-name-sub root-info">
+                              {proc.childCount} 个子进程 · 合计 {fmtMem(proc.familyPrivateKB)}
+                            </span>
+                          )}
+                          {!isRoot && folder && folder !== displayName && (
+                            <span className="proc-name-sub">{folder}</span>
+                          )}
+                        </td>
+                        <td className="col-path" title={proc.exePath}>
+                          {(!isRoot && folder) ? folder : (
+                            proc.exePath.length > 45
+                              ? proc.exePath.slice(0, 43) + '..'
+                              : proc.exePath
+                          )}
+                        </td>
+                        <td className="col-mem">
+                          {fmtMem(proc.privateWorkingSetKB)}
+                          {isRoot && proc.childCount > 0 && (
+                            <span className="family-total">({fmtMem(proc.familyPrivateKB)})</span>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            )}
+            {filteredProcesses.length > 200 && (
+              <div className="process-list-more">仅显示前 200 条匹配结果，请缩小搜索范围</div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* 会话控制 */}
@@ -211,15 +514,20 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         onStop={handleStopSession}
         onAddMark={handleAddMark}
         markCount={markTimeline.length}
-        targetAppPath={displayTargetPath}
+        targetAppPath={displayTargetInfo}
       />
 
-      {!snap ? (
+      {!isRunning && !snap ? (
+        <div className="mmt-waiting-first-snap">
+          <p>当前未在采集。请搜索进程并点击「附加并监控」，或填写测试名称后点击「开始记录」。</p>
+        </div>
+      ) : null}
+      {isRunning && !snap ? (
         <div className="mmt-waiting-first-snap">
           <div className="loading-spinner" />
-          <p>正在等待首帧内存快照…</p>
+          <p>正在等待首帧内存快照...</p>
           <p className="loading-hint">
-            主进程首拍可能包含外部子树异步采集，需数秒属正常。此期间仍可使用上方「开始记录」、路径选择与「启动并监控」。
+            首拍可能包含子树异步采集，需数秒属正常。此期间仍可使用上方进程搜索与附加功能。
           </p>
         </div>
       ) : null}
@@ -262,6 +570,13 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
           title={externalMonitor ? '进程树合计' : '总内存'}
           value={formatKB(s.totalWorkingSetSize)}
           color="#646cff"
+        />
+        <MetricCard
+          icon="📦"
+          title={externalMonitor ? '专用提交合计' : '总专用提交'}
+          value={formatKB(s.totalPrivateBytes ?? 0)}
+          detail="Win32 PrivateUsage / Chromium privateBytes"
+          color="#b37feb"
         />
         <MetricCard
           icon="🧠"
@@ -308,7 +623,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
           <MetricCard
             icon="🎮"
             title="GPU 引擎"
-            value={externalMetrics.gpuEnginePercent != null ? `${externalMetrics.gpuEnginePercent}` : '—'}
+            value={externalMetrics.gpuEnginePercent != null ? `${externalMetrics.gpuEnginePercent}` : '-'}
             unit={externalMetrics.gpuEnginePercent != null ? '%' : undefined}
             detail={externalRollup?.gpu || undefined}
             color="#ff6b6b"
@@ -316,7 +631,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
           <MetricCard
             icon="🧩"
             title="GPU 显存"
-            value={externalMetrics.gpuDedicatedMB != null ? `${externalMetrics.gpuDedicatedMB}` : '—'}
+            value={externalMetrics.gpuDedicatedMB != null ? `${externalMetrics.gpuDedicatedMB}` : '-'}
             unit={externalMetrics.gpuDedicatedMB != null ? 'MB' : undefined}
             detail={externalRollup?.vram || undefined}
             color="#9254de"
@@ -332,7 +647,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
             {externalMonitor ? (
               <>
                 <strong>进程树合计</strong>（紫色）为勾选「计入合计」后的汇总；彩色折线为<strong>各 PID 单独占用</strong>
-                （按本会话内峰值内存取前 12 名，其余进程合并为灰色虚线「其余…合计」）。关注单条曲线持续爬升可定位到具体子进程。
+                （按本会话内峰值内存取前 12 名，其余进程合并为灰色虚线「其余...合计」）。关注单条曲线持续爬升可定位到具体子进程。
               </>
             ) : (
               <>
@@ -365,7 +680,7 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
         </section>
       ) : (
         <p className="mmt-self-monitor-hint chart-caption">
-          当前为<strong>自监控</strong>模式：仅展示本工具 Electron 内存曲线。若需 CPU/磁盘/GPU 进程树级趋势，请使用「启动并监控」外部 exe。
+          当前为<strong>自监控</strong>模式：仅展示本工具 Electron 内存曲线。若需 CPU/磁盘/GPU 进程树级趋势，请使用上方「附加并监控」功能。
         </p>
       )}
 

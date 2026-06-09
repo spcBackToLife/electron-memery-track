@@ -44,6 +44,11 @@ export default defineConfig({
     },
   },
 
+  server: {
+    port: 3900,
+    strictPort: true,
+  },
+
   css: {
     preprocessorOptions: {
       less: {},

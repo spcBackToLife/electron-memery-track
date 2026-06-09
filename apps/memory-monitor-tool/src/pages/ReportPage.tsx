@@ -17,6 +17,8 @@ const ReportPage: React.FC = () => {
   const [loading, setLoading] = useState(false)
   /** 旧版 report.json 无 eventMarks 时，从快照推导 */
   const [marksFallback, setMarksFallback] = useState<ReportEventMark[]>([])
+  /** 原始快照（传给 ReportDataCharts 用于按 PID 粒度展示） */
+  const [snapshots, setSnapshots] = useState<MemorySnapshot[]>([])
   const loadReportSeq = useRef(0)
   const { showToast } = useToast()
 
@@ -39,9 +41,13 @@ const ReportPage: React.FC = () => {
     const seq = ++loadReportSeq.current
     setLoading(true)
     try {
-      const r = (await window.monitorAPI.getSessionReport(sessionId)) as ReportSummary | null
+      const [r, snaps] = await Promise.all([
+        window.monitorAPI.getSessionReport(sessionId) as Promise<ReportSummary | null>,
+        window.monitorAPI.getSessionSnapshots(sessionId, 2000) as Promise<MemorySnapshot[]>,
+      ])
       if (seq !== loadReportSeq.current) return
       setReport(r)
+      setSnapshots(snaps ?? [])
     } catch (err) {
       console.error('[ReportPage] Failed to load report:', err)
       if (seq === loadReportSeq.current) showToast('加载报告失败', 'error')
@@ -190,7 +196,7 @@ const ReportPage: React.FC = () => {
                 <p className="conclusion-reason">{report.trendAnalysis.reason}</p>
               </div>
 
-              <ReportDataCharts report={report} eventMarks={marksForTable.length > 0 ? marksForTable : undefined} />
+              <ReportDataCharts report={report} eventMarks={marksForTable.length > 0 ? marksForTable : undefined} snapshots={snapshots.length > 0 ? snapshots : undefined} />
 
               {marksForTable.length > 0 && (
                 <div className="report-event-marks">
@@ -245,6 +251,22 @@ const ReportPage: React.FC = () => {
                     <span className="summary-value">{report.summary.finalTotalMB} MB</span>
                     <span className="summary-label">末值总内存</span>
                   </div>
+                  {report.summary.peakTotalPrivateBytesMB != null ? (
+                    <>
+                      <div className="summary-card">
+                        <span className="summary-value">{report.summary.peakTotalPrivateBytesMB} MB</span>
+                        <span className="summary-label">峰值专用提交</span>
+                      </div>
+                      <div className="summary-card">
+                        <span className="summary-value">{report.summary.avgTotalPrivateBytesMB ?? '—'} MB</span>
+                        <span className="summary-label">平均专用提交</span>
+                      </div>
+                      <div className="summary-card">
+                        <span className="summary-value">{report.summary.finalTotalPrivateBytesMB ?? '—'} MB</span>
+                        <span className="summary-label">末值专用提交</span>
+                      </div>
+                    </>
+                  ) : null}
                   <div className="summary-card">
                     <span className="summary-value">{report.summary.peakBrowserMB} MB</span>
                     <span className="summary-label">主进程峰值</span>

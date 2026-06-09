@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react'
+import React, { useMemo, useState } from 'react'
 import type { ProcessMemoryInfo } from '../types'
 import { getEffectiveMemoryKB } from '../utils/format'
 
@@ -43,6 +43,18 @@ const getTypeColor = (type: string): string => {
     case 'GPU': return '#f5a623'
     default: return '#999'
   }
+}
+
+/** 判断一个进程是否为 DevTools 控制台窗口（通过命令行特征识别） */
+function isDevToolsProcess(proc: ProcessMemoryInfo): boolean {
+  // Chromium/CEF 的 DevTools 进程命令行中包含 devtools:// 协议 URL 或 --devtools 标志
+  const cmd = (proc.commandLine || '').toLowerCase()
+  if (cmd.includes('devtools://')) return true
+  // Electron DevTools 也可能通过 --devtools 参数或 URL 中带 devtools 关键字
+  if (cmd.includes('--devtools') && cmd.includes('--type=renderer')) return true
+  // chromiumType 为 renderer 且命令行含 devtools 关键字
+  if ((proc.chromiumType || '').startsWith('renderer') && /devtools/.test(cmd)) return true
+  return false
 }
 
 /** Chromium --type= 简短中文，与任务管理器命令行一致 */
@@ -103,10 +115,20 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
   externalTotalIncludedPids,
   onTogglePidInTotal,
 }) => {
+  // 隐藏 DevTools 开关（仅当检测到 DevTools 进程时显示）
+  const [hideDevTools, setHideDevTools] = useState(true)
+  const hasDevTools = useMemo(() => processes.some(p => isDevToolsProcess(p)), [processes])
+
   const sorted = useMemo(
     () => [...processes].sort((a, b) => getEffectiveMemoryKB(b.memory) - getEffectiveMemoryKB(a.memory)),
     [processes],
   )
+
+  // 过滤 DevTools（如果开关开启）
+  const displayList = useMemo(() => {
+    if (!hideDevTools) return sorted
+    return sorted.filter(p => !isDevToolsProcess(p))
+  }, [sorted, hideDevTools])
 
   const includedSet = useMemo(() => {
     if (!externalMonitor || !externalTotalIncludedPids) {
@@ -119,6 +141,21 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
 
   return (
     <div className="mmt-process-table-container">
+      {/* 隐藏 DevTools 开关 */}
+      {externalMonitor && hasDevTools && (
+        <div className="mmt-devtools-filter-bar">
+          <label className="mmt-devtools-toggle">
+            <input
+              type="checkbox"
+              checked={hideDevTools}
+              onChange={e => setHideDevTools(e.target.checked)}
+            />
+            隐藏 DevTools 控制台进程
+          </label>
+          <span className="mmt-devtools-hint">（DevTools 是调试工具窗口的渲染进程，通常不影响被测应用内存）</span>
+        </div>
+      )}
+
       <table className="mmt-process-table">
         <thead>
           <tr>
@@ -131,6 +168,7 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
             </th>
             <th>{externalMonitor ? '进程名' : '名称'}</th>
             <th title="优先专用工作集（系统 API / Native），未就绪时回退工作集">内存</th>
+            <th title="专用已提交 privateBytes（Win32 PrivateUsage），通常大于专用工作集">专用提交</th>
             <th title="Electron 上报的峰值工作集">峰值</th>
             <th>CPU</th>
             {externalMonitor ? (
@@ -142,7 +180,7 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
           </tr>
         </thead>
         <tbody>
-          {sorted.map((proc) => {
+          {displayList.map((proc) => {
             const inTotal = !includedSet || includedSet.has(proc.pid)
             const typeBadge: { label: string; color: string; title?: string } = externalMonitor
               ? externalTypeBadge(proc)
@@ -179,6 +217,7 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
                 </td>
                 <td className="proc-name">{proc.name || (externalMonitor ? `PID ${proc.pid}` : '-')}</td>
                 <td className="mem-value">{formatKB(getEffectiveMemoryKB(proc.memory))}</td>
+                <td className="mem-value">{formatKB(proc.memory.privateBytes ?? 0)}</td>
                 <td className="mem-value">{formatKB(proc.memory.peakWorkingSetSize)}</td>
                 <td className="cpu-value">{proc.cpu.percentCPUUsage.toFixed(1)}%</td>
                 {externalMonitor ? (
@@ -193,11 +232,11 @@ const ProcessTable: React.FC<ProcessTableProps> = ({
         </tbody>
       </table>
 
-      {processes.length === 0 && (
+      {processes.length === 0 ? (
         <div className="mmt-process-table-empty">
           暂无进程数据，请确认目标应用正在运行
         </div>
-      )}
+      ) : null}
     </div>
   )
 }

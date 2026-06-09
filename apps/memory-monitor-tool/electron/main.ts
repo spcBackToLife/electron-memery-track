@@ -18,10 +18,12 @@ import {
   gatherExternalMonitorSnapshotAsync,
   isNativeMemoryLoaded,
   batchGetProcessTimesAndIoSync,
+  enumerateAllProcessesSync,
   type ExternalGatheredSnapshotPayload,
   type ExternalNativeMemoryRow,
   type NativeProcessTreeRow,
   type ProcessTimesIoRow,
+  type SystemProcessListItem,
 } from './native-memory'
 import { fetchWindowsProcessTree } from './external-process-tree'
 import { queryGpuSystemSnapshotCached } from './external-gpu-metrics'
@@ -56,6 +58,8 @@ interface ProcessMemoryInfo {
     peakWorkingSetSize: number
     /** 专用工作集 KB，来自系统层采集（Native / PowerShell） */
     privateWorkingSet?: number
+    /** 专用已提交 KB（Win32 PrivateUsage / Chromium privateBytes） */
+    privateBytes?: number
   }
 }
 
@@ -65,6 +69,8 @@ interface MemorySnapshot {
   seq: number
   processes: ProcessMemoryInfo[]
   totalWorkingSetSize: number
+  /** 各进程专用已提交之和 (KB) */
+  totalPrivateBytes?: number
   system: {
     total: number
     free: number
@@ -137,6 +143,17 @@ let collectTimer: ReturnType<typeof setInterval> | null = null
 let collectTickChain: Promise<void> = Promise.resolve()
 /** 用于 MMT_PERF_CHAIN 观察 setInterval 是否漂移（GC/同步磁盘阻塞） */
 let lastCollectScheduledAt = 0
+/** AbortController：用于真正取消采集链（stopCollecting 时 abort，runCollectTickBody 检测到后立即退出） */
+let collectAbortController: AbortController | null = null
+/** 采集代次：stop/start 时递增，用于丢弃目标进程已退出后仍返回的迟到 tick */
+let collectEpoch = 0
+/** 每拍 Promise.race 的超时句柄，stop 时统一 clear，避免结束后 15s 仍打 COLLECT_TIMEOUT */
+const pendingCollectTimeouts = new Set<ReturnType<typeof setTimeout>>()
+/** 连续超时次数：达到 MAX_CONSECUTIVE_TIMEOUTS 自动结束会话 */
+let consecutiveTimeoutCount = 0
+const MAX_CONSECUTIVE_TIMEOUTS = 2
+/** 防止 endSession 落盘期间 currentSession 仍为 running，导致超时 tick 重复进入 endSession */
+let endSessionInProgress = false
 
 /** 存储目录 */
 let storageDir: string
@@ -230,6 +247,7 @@ function maybeRefreshExternalTree(): void {
   })
 }
 
+/** 仅清理外部进程树状态，不启停采集定时器 */
 function clearExternalMonitorState(): void {
   monitoredRootPid = null
   externalPidsCache = []
@@ -239,6 +257,7 @@ function clearExternalMonitorState(): void {
   externalTotalExcludedPids = new Set()
   externalTreeLastRefresh = 0
   lastExternalPerfSample = null
+  targetAppInfo = null
 }
 
 /** 根据两拍 GetProcessTimes / GetProcessIoCounters 差分得到 CPU% 与磁盘 KB/s */
@@ -442,6 +461,18 @@ function getEffectiveMemoryKB(mem: ProcessMemoryInfo['memory']): number {
   return mem.privateWorkingSet ?? mem.workingSetSize
 }
 
+function getPrivateBytesKB(mem: ProcessMemoryInfo['memory']): number {
+  if (mem.privateBytes != null && mem.privateBytes > 0) return mem.privateBytes
+  return mem.privateWorkingSet ?? mem.workingSetSize
+}
+
+function sumPrivateBytesKB(processes: ProcessMemoryInfo[], includedPids?: number[]): number {
+  const included = includedPids ? new Set(includedPids) : null
+  return processes
+    .filter((p) => !included || included.has(p.pid))
+    .reduce((sum, p) => sum + getPrivateBytesKB(p.memory), 0)
+}
+
 /** 与前端 ReportEventMark / SDK SessionEventMark 字段对齐，写入 report.json */
 interface ReportEventMarkRow {
   timestamp: number
@@ -451,6 +482,7 @@ interface ReportEventMarkRow {
   browserKB: number
   rendererKB: number
   gpuKB: number
+  utilityKB: number
 }
 
 function collectReportEventMarks(snapshots: MemorySnapshot[]): ReportEventMarkRow[] {
@@ -466,6 +498,9 @@ function collectReportEventMarks(snapshots: MemorySnapshot[]): ReportEventMarkRo
     const gpuKB = s.processes
       .filter((p) => p.type === 'GPU')
       .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
+    const utilityKB = s.processes
+      .filter((p) => p.type === 'Utility')
+      .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
     for (const m of s.marks) {
       out.push({
         timestamp: m.timestamp,
@@ -475,6 +510,7 @@ function collectReportEventMarks(snapshots: MemorySnapshot[]): ReportEventMarkRo
         browserKB,
         rendererKB,
         gpuKB,
+        utilityKB,
       })
     }
   }
@@ -499,6 +535,7 @@ function buildSnapshotSelf(): MemorySnapshot {
       workingSetSize: m.memory.workingSetSize,
       peakWorkingSetSize: m.memory.peakWorkingSetSize,
       privateWorkingSet: privateWsCache.get(m.pid),
+      privateBytes: (m.memory as unknown as Record<string, number>).privateBytes,
     },
   }))
 
@@ -506,6 +543,7 @@ function buildSnapshotSelf(): MemorySnapshot {
     (sum, p) => sum + getEffectiveMemoryKB(p.memory),
     0,
   )
+  const totalPrivateBytes = sumPrivateBytesKB(processes)
 
   const systemTotal = os.totalmem()
   const systemFree = os.freemem()
@@ -521,6 +559,7 @@ function buildSnapshotSelf(): MemorySnapshot {
     seq: snapshotSeq++,
     processes,
     totalWorkingSetSize,
+    totalPrivateBytes,
     system: {
       total: systemTotal,
       free: systemFree,
@@ -564,19 +603,33 @@ function composeExternalSnapshot(
   const processes: ProcessMemoryInfo[] = displayPids.map((pid) => {
     const row = nativeMem.get(pid)
     const privKb = row?.privateKb ?? 0
+    const privateBytesKb = row?.privateBytesKb ?? 0
     const wsKb = row?.workingSetKb ?? 0
     const peakKb = row?.peakKb ?? wsKb
     const isRoot = pid === root
     const exe = externalExePathCache.get(pid)
     const cmd = externalCommandLineCache.get(pid)
     const r = rates.get(pid)
+    const chromiumRole = parseChromiumProcessRole(cmd)
+    // 根据命令行 --type= 推断进程类型（不再把非根进程全部当 Tab）
+    const inferredType: ProcessMemoryInfo['type'] = isRoot
+      ? 'Browser'
+      : (function (): ProcessMemoryInfo['type'] {
+          if (!chromiumRole) return 'Tab'
+          const t = chromiumRole.split(':')[0]?.toLowerCase() ?? ''
+          if (t === 'gpu-process') return 'GPU'
+          if (t === 'utility') return 'Utility'
+          if (t === 'renderer') return 'Tab'
+          // Zygote / crashpad-handler 等归入 Utility 展示
+          return 'Utility'
+        })()
     return {
       pid,
-      type: (isRoot ? 'Browser' : 'Tab') as ProcessMemoryInfo['type'],
+      type: inferredType,
       name: externalNamesCache.get(pid),
       executablePath: exe,
       commandLine: cmd,
-      chromiumType: parseChromiumProcessRole(cmd),
+      chromiumType: chromiumRole,
       cpu: { percentCPUUsage: r?.cpuPct ?? 0, idleWakeupsPerSecond: 0 },
       diskReadKBps: r?.readKBps ?? 0,
       diskWriteKBps: r?.writeKBps ?? 0,
@@ -584,6 +637,7 @@ function composeExternalSnapshot(
         workingSetSize: wsKb,
         peakWorkingSetSize: peakKb,
         privateWorkingSet: privKb,
+        privateBytes: privateBytesKb > 0 ? privateBytesKb : undefined,
       },
     }
   }).sort((a, b) => getEffectiveMemoryKB(b.memory) - getEffectiveMemoryKB(a.memory))
@@ -592,6 +646,7 @@ function composeExternalSnapshot(
   const totalWorkingSetSize = processes
     .filter((p) => includedPids.includes(p.pid))
     .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
+  const totalPrivateBytes = sumPrivateBytesKB(processes, includedPids)
 
   let aggregateCpuPercent = 0
   let diskReadKBps = 0
@@ -620,6 +675,7 @@ function composeExternalSnapshot(
     seq: snapshotSeq++,
     processes,
     totalWorkingSetSize,
+    totalPrivateBytes,
     system: {
       total: systemTotal,
       free: systemFree,
@@ -658,9 +714,13 @@ function buildSnapshotExternalSync(): MemorySnapshot {
 
 /** 定时采集路径：子树 + 内存 + Times/IO 在 Native AsyncWorker 中执行，避免主线程长时间「未响应」。 */
 async function buildSnapshotExternalAsync(): Promise<MemorySnapshot> {
+  const root = monitoredRootPid
+  if (root == null) throw new Error('COLLECT_ABORTED')
+
   const timestamp = Date.now()
-  const root = monitoredRootPid!
   const gathered: ExternalGatheredSnapshotPayload | null = await gatherExternalMonitorSnapshotAsync(root)
+
+  if (monitoredRootPid == null) throw new Error('COLLECT_ABORTED')
 
   if (gathered && gathered.tree.length > 0) {
     applyExternalStateFromTreeRows(root, gathered.tree)
@@ -775,6 +835,8 @@ async function startSession(label: string, description?: string): Promise<TestSe
 
   broadcastToRenderer('session:started', session)
 
+  startCollecting()
+
   perfChainMain('startSession', { sessionId: session.id, label })
   console.log(`[MonitorTool] Session started: ${label} (${session.id})`)
   return session
@@ -783,67 +845,90 @@ async function startSession(label: string, description?: string): Promise<TestSe
 /** 异步落盘：避免巨量 writeFileSync 长时间霸占主线程，其它 IPC（如拉取报告）可穿插执行 */
 async function endSession(): Promise<TestSession | null> {
   if (!currentSession || currentSession.status !== 'running') return null
-
-  const endedRef = currentSession
-  const buffer = snapshotsBuffer
-
-  let report: ReportSummary
-  try {
-    const sessionDataFile = path.join(storageDir, endedRef.dataFile)
-    const lines = buffer.map((s) => JSON.stringify(s))
-    await fs.promises.writeFile(sessionDataFile, lines.join('\n'), 'utf-8')
-    report = generateReportSummary(endedRef, buffer)
-    await fs.promises.writeFile(
-      path.join(storageDir, `${endedRef.id}.report.json`),
-      JSON.stringify(report, null, 2),
-      'utf-8',
-    )
-  } catch (err) {
-    console.error('[MonitorTool] endSession 持久化失败（仍会结束会话）:', err)
-    try {
-      report = generateReportSummary(endedRef, buffer)
-    } catch {
-      report = {
-        sessionId: endedRef.id,
-        label: endedRef.label,
-        description: endedRef.description,
-        startTime: endedRef.startTime,
-        endTime: Date.now(),
-        durationMs: 0,
-        snapshotCount: buffer.length,
-        summary: {
-          peakTotalMB: 0,
-          avgTotalMB: 0,
-          finalTotalMB: 0,
-          peakBrowserMB: 0,
-          peakRendererMB: 0,
-          peakProcessCount: 0,
-        },
-        trendAnalysis: {
-          hasGrowthTrend: false,
-          growthRatePerMin: 0,
-          growthAmountMB: 0,
-          conclusion: 'PASS',
-          reason: '报告生成失败，已结束会话',
-        },
-        dataPoints: [],
-      }
-    }
+  if (endSessionInProgress) {
+    console.log('[MonitorTool] endSession skipped (already in progress)')
+    return null
   }
 
-  endedRef.endTime = Date.now()
-  endedRef.status = 'completed'
-  endedRef.snapshotCount = buffer.length
+  endSessionInProgress = true
+  try {
+    stopCollecting()
+    clearExternalMonitorState()
+    collectTickChain = Promise.resolve()
 
-  saveSessionsIndex()
+    const endedRef = currentSession
+    const buffer = [...snapshotsBuffer]
+    const endTime = Date.now()
 
-  broadcastToRenderer('session:ended', { session: endedRef, report })
+    // 落盘前立即标记结束，避免在途 tick 超时再次调用 endSession（collectEpoch 连跳、停不下来）
+    endedRef.status = 'completed'
+    endedRef.endTime = endTime
+    currentSession = null
+    snapshotsBuffer = []
 
-  currentSession = null
-  snapshotsBuffer = []
+    const idx = sessionsIndex.findIndex((s) => s.id === endedRef.id)
+    if (idx >= 0) {
+      sessionsIndex[idx].status = 'completed'
+      sessionsIndex[idx].endTime = endTime
+    }
+    saveSessionsIndex()
 
-  console.log(`[MonitorTool] Session ended: ${endedRef.label}`)
-  return endedRef
+    let report: ReportSummary
+    try {
+      const sessionDataFile = path.join(storageDir, endedRef.dataFile)
+      const lines = buffer.map((s) => JSON.stringify(s))
+      await fs.promises.writeFile(sessionDataFile, lines.join('\n'), 'utf-8')
+      report = generateReportSummary(endedRef, buffer)
+      await fs.promises.writeFile(
+        path.join(storageDir, `${endedRef.id}.report.json`),
+        JSON.stringify(report, null, 2),
+        'utf-8',
+      )
+    } catch (err) {
+      console.error('[MonitorTool] endSession 持久化失败（仍会结束会话）:', err)
+      try {
+        report = generateReportSummary(endedRef, buffer)
+      } catch {
+        report = {
+          sessionId: endedRef.id,
+          label: endedRef.label,
+          description: endedRef.description,
+          startTime: endedRef.startTime,
+          endTime,
+          durationMs: 0,
+          snapshotCount: buffer.length,
+          summary: {
+            peakTotalMB: 0,
+            avgTotalMB: 0,
+            finalTotalMB: 0,
+            peakBrowserMB: 0,
+            peakRendererMB: 0,
+            peakUtilityMB: 0,
+            peakProcessCount: 0,
+          },
+          trendAnalysis: {
+            hasGrowthTrend: false,
+            growthRatePerMin: 0,
+            growthAmountMB: 0,
+            conclusion: 'PASS',
+            reason: '报告生成失败，已结束会话',
+          },
+          dataPoints: [],
+        }
+      }
+    }
+
+    endedRef.snapshotCount = buffer.length
+
+    saveSessionsIndex()
+
+    broadcastToRenderer('session:ended', { session: endedRef, report })
+
+    console.log(`[MonitorTool] Session ended: ${endedRef.label}`)
+    return endedRef
+  } finally {
+    endSessionInProgress = false
+  }
 }
 
 // ============ 报告生成 ============
@@ -869,8 +954,16 @@ interface ReportSummary {
     peakBrowserMB: number
     /** 渲染进程峰值 (MB) */
     peakRendererMB: number
+    /** 辅助进程峰值 (MB) */
+    peakUtilityMB: number
     /** 进程数峰值 */
     peakProcessCount: number
+    /** 专用已提交峰值 (MB) */
+    peakTotalPrivateBytesMB?: number
+    /** 专用已提交均值 (MB) */
+    avgTotalPrivateBytesMB?: number
+    /** 专用已提交末值 (MB) */
+    finalTotalPrivateBytesMB?: number
   }
 
   // 趋势分析（面向测试的解读）
@@ -891,9 +984,12 @@ interface ReportSummary {
   dataPoints: Array<{
     timestamp: number
     totalMB: number
+    /** 专用已提交合计 (MB) */
+    totalPrivateBytesMB?: number
     browserMB: number
     rendererMB: number
     gpuMB: number
+    utilityMB: number
     processCount: number
     /** 外部模式：子树 CPU/磁盘 KB/s、子树 PID 过滤 GPU（与快照 externalMetrics 一致） */
     extCpuPercent?: number
@@ -925,7 +1021,11 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
       endTime: Date.now(),
       durationMs: Date.now() - session.startTime,
       snapshotCount: 0,
-      summary: { peakTotalMB: 0, avgTotalMB: 0, finalTotalMB: 0, peakBrowserMB: 0, peakRendererMB: 0, peakProcessCount: 0 },
+      summary: {
+        peakTotalMB: 0, avgTotalMB: 0, finalTotalMB: 0,
+        peakBrowserMB: 0, peakRendererMB: 0, peakUtilityMB: 0, peakProcessCount: 0,
+        peakTotalPrivateBytesMB: 0, avgTotalPrivateBytesMB: 0, finalTotalPrivateBytesMB: 0,
+      },
       trendAnalysis: { hasGrowthTrend: false, growthRatePerMin: 0, growthAmountMB: 0, conclusion: 'PASS', reason: '无数据' },
       dataPoints: [],
       eventMarks: [],
@@ -935,8 +1035,11 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
   // 计算各指标
   let peakTotal = 0
   let sumTotal = 0
+  let peakTotalPrivateBytes = 0
+  let sumTotalPrivateBytes = 0
   let peakBrowser = 0
   let peakRenderer = 0
+  let peakUtility = 0
   let peakProcCount = 0
 
   const dataPoints = snapshots.map((s) => {
@@ -949,24 +1052,38 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
     const gpuMem = s.processes
       .filter((p) => p.type === 'GPU')
       .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
+    const utilityMem = s.processes
+      .filter((p) => p.type === 'Utility')
+      .reduce((sum, p) => sum + getEffectiveMemoryKB(p.memory), 0)
 
     const totalMB = Math.round(s.totalWorkingSetSize / 1024 * 10) / 10
+    const totalPrivateBytesKB = s.totalPrivateBytes ?? sumPrivateBytesKB(
+      s.processes,
+      s.externalTotalIncludedPids,
+    )
+    const totalPrivateBytesMB = Math.round(totalPrivateBytesKB / 1024 * 10) / 10
     const browserMB = Math.round(browserMem / 1024 * 10) / 10
     const rendererMB = Math.round(rendererMem / 1024 * 10) / 10
     const gpuMB = Math.round(gpuMem / 1024 * 10) / 10
+    const utilityMB = Math.round(utilityMem / 1024 * 10) / 10
 
     peakTotal = Math.max(peakTotal, s.totalWorkingSetSize)
     sumTotal += s.totalWorkingSetSize
+    peakTotalPrivateBytes = Math.max(peakTotalPrivateBytes, totalPrivateBytesKB)
+    sumTotalPrivateBytes += totalPrivateBytesKB
     peakBrowser = Math.max(peakBrowser, browserMem)
     peakRenderer = Math.max(peakRenderer, rendererMem)
+    peakUtility = Math.max(peakUtility, utilityMem)
     peakProcCount = Math.max(peakProcCount, s.processes.length)
 
     const pt: ReportSummary['dataPoints'][number] = {
       timestamp: s.timestamp,
       totalMB,
+      totalPrivateBytesMB,
       browserMB,
       rendererMB,
       gpuMB,
+      utilityMB,
       processCount: s.processes.length,
     }
     if (s.monitorMode === 'external' && s.externalMetrics) {
@@ -1046,7 +1163,11 @@ function generateReportSummary(session: TestSession, snapshots: MemorySnapshot[]
       finalTotalMB: dataPoints[dataPoints.length - 1].totalMB,
       peakBrowserMB: Math.round(peakBrowser / 1024 * 10) / 10,
       peakRendererMB: Math.round(peakRenderer / 1024 * 10) / 10,
+      peakUtilityMB: Math.round(peakUtility / 1024 * 10) / 10,
       peakProcessCount: peakProcCount,
+      peakTotalPrivateBytesMB: Math.round(peakTotalPrivateBytes / 1024 * 10) / 10,
+      avgTotalPrivateBytesMB: Math.round(sumTotalPrivateBytes / snapshots.length / 1024 * 10) / 10,
+      finalTotalPrivateBytesMB: dataPoints[dataPoints.length - 1].totalPrivateBytesMB ?? 0,
     },
 
     trendAnalysis: {
@@ -1164,72 +1285,168 @@ function compareReports(base: ReportSummary, target: ReportSummary): CompareResu
 /** 单次采集 tick 的最大执行时间（ms），超后丢弃该拍并继续下一拍，避免外部进程退出时 native hang 导致整条链死锁 */
 const COLLECT_TICK_TIMEOUT_MS = 15000
 
+function clearPendingCollectTimeouts(): void {
+  for (const id of pendingCollectTimeouts) clearTimeout(id)
+  pendingCollectTimeouts.clear()
+}
+
+function bumpCollectEpoch(): void {
+  collectEpoch += 1
+}
+
+function isCollectTickStale(epochAtStart: number): boolean {
+  return epochAtStart !== collectEpoch || collectTimer == null
+}
+
 function enqueueCollectTick(): void {
+  if (!collectTimer || !collectAbortController || collectAbortController.signal.aborted) return
   collectTickChain = collectTickChain
     .then(() => runCollectTickBody())
     .catch((err) => {
+      const errMsg = err instanceof Error ? err.message : String(err)
+      if (errMsg.includes('COLLECT_ABORTED') || errMsg.includes('COLLECT_TIMEOUT')) return
       console.error('[MonitorTool] collect tick failed:', err)
     })
 }
 
 async function runCollectTickBody(): Promise<void> {
+  const epochAtStart = collectEpoch
+  if (isCollectTickStale(epochAtStart)) return
+
   const now = Date.now()
   const driftMs = lastCollectScheduledAt ? now - lastCollectScheduledAt - CONFIG.collectInterval : 0
   lastCollectScheduledAt = now
   const b0 = Date.now()
 
-  // 超时保护：若单次 buildSnapshot（尤其是 native 外部采集）hang 住，放弃该拍、解整条链
-  const snapshot = await Promise.race([
-    buildSnapshotAsync(),
-    new Promise<MemorySnapshot>((_resolve, reject) =>
-      setTimeout(() => reject(new Error(`collect tick timeout after ${COLLECT_TICK_TIMEOUT_MS}ms`)), COLLECT_TICK_TIMEOUT_MS),
-    ),
-  ])
+  if (collectAbortController?.signal.aborted || isCollectTickStale(epochAtStart)) {
+    console.log('[MonitorTool] collect tick aborted, skipping')
+    return
+  }
 
-  const buildMs = Date.now() - b0
-  perfChainMain('collect_tick', {
-    driftMs,
-    buildMs,
-    seq: snapshot.seq,
-    monitorMode: snapshot.monitorMode ?? 'self',
-    procCount: snapshot.processes.length,
+  const abortPromise = new Promise<MemorySnapshot>((_, reject) => {
+    const ctrl = collectAbortController
+    if (!ctrl?.signal) return
+    const onAbort = () => reject(new Error('COLLECT_ABORTED'))
+    if (ctrl.signal.aborted) onAbort()
+    else ctrl.signal.addEventListener('abort', onAbort, { once: true })
   })
-  pushSnapshot(snapshot)
+
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const timeoutPromise = new Promise<MemorySnapshot>((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`COLLECT_TIMEOUT after ${COLLECT_TICK_TIMEOUT_MS}ms`)),
+      COLLECT_TICK_TIMEOUT_MS,
+    )
+    pendingCollectTimeouts.add(timeoutId)
+  })
+
+  try {
+    const snapshot = await Promise.race([buildSnapshotAsync(), abortPromise, timeoutPromise])
+
+    if (isCollectTickStale(epochAtStart)) return
+
+    consecutiveTimeoutCount = 0
+
+    const buildMs = Date.now() - b0
+    perfChainMain('collect_tick', {
+      driftMs,
+      buildMs,
+      seq: snapshot.seq,
+      monitorMode: snapshot.monitorMode ?? 'self',
+      procCount: snapshot.processes.length,
+    })
+    pushSnapshot(snapshot)
+  } catch (err) {
+    if (isCollectTickStale(epochAtStart)) return
+
+    const errMsg = err instanceof Error ? err.message : String(err)
+
+    if (errMsg.includes('COLLECT_ABORTED')) {
+      console.log('[MonitorTool] collect tick aborted via AbortController')
+      return
+    }
+
+    if (errMsg.includes('COLLECT_TIMEOUT') || errMsg.includes('GATHER_TIMEOUT')) {
+      if (endSessionInProgress || currentSession?.status !== 'running') {
+        console.log('[MonitorTool] collect tick timeout ignored (session not active)')
+        return
+      }
+      consecutiveTimeoutCount++
+      console.error(`[MonitorTool] collect tick timeout (${consecutiveTimeoutCount}/${MAX_CONSECUTIVE_TIMEOUTS})`)
+
+      if (consecutiveTimeoutCount >= MAX_CONSECUTIVE_TIMEOUTS) {
+        console.warn('[MonitorTool] 连续超时 2 次，自动结束会话')
+        await endSession()
+      }
+      return
+    }
+
+    consecutiveTimeoutCount = 0
+    throw err
+  } finally {
+    if (timeoutId != null) {
+      clearTimeout(timeoutId)
+      pendingCollectTimeouts.delete(timeoutId)
+    }
+  }
 }
 
-/** 强制重置采集串行链（用于检测到链可能 hang 死的场景，如重新启动外部应用后首拍迟迟不来） */
+/** 强制重置采集串行链（目标进程已退出、重新附加前调用） */
 function forceResetCollectChain(): void {
-  // 不直接操作 collectTickChain（无法从外部 cancel Promise），
-  // 而是记录一个标志让下个 tick 检测到并跳过超时等待
-  console.warn('[MonitorTool] forceResetCollectChain called — next tick will bypass stale chain if still pending')
+  tearDownCollectScheduler()
+  consecutiveTimeoutCount = 0
+  console.warn('[MonitorTool] forceResetCollectChain: 已停止采集并丢弃在途 tick')
+}
+
+/** 拆除定时器 / abort / 代次；不打印「已停止」（供 startCollecting 重启调度，避免误报） */
+function tearDownCollectScheduler(): void {
+  if (collectTimer) {
+    clearInterval(collectTimer)
+    collectTimer = null
+  }
+  clearPendingCollectTimeouts()
+  if (collectAbortController) {
+    try { collectAbortController.abort() } catch { /* ignore */ }
+    collectAbortController = null
+  }
+  bumpCollectEpoch()
+  collectTickChain = Promise.resolve()
 }
 
 function startCollecting(): void {
-  if (collectTimer) return
+  tearDownCollectScheduler()
+
+  collectAbortController = new AbortController()
+  consecutiveTimeoutCount = 0
 
   initPrivateWsRefreshInterval()
 
-  // 立即采集一次（外部模式走异步 gather，避免首帧卡死 UI）
   lastCollectScheduledAt = Date.now()
-  enqueueCollectTick()
-
   collectTimer = setInterval(() => {
     enqueueCollectTick()
   }, CONFIG.collectInterval)
 
+  enqueueCollectTick()
+
   console.log('[MonitorTool] Collection started, interval:', CONFIG.collectInterval, 'ms')
   perfChainMain('startCollecting', {
     intervalMs: CONFIG.collectInterval,
+    collectEpoch,
     note: '单一定时器；每 interval 仅 buildSnapshot 一次 + pushSnapshot',
   })
 }
 
 function stopCollecting(): void {
-  if (collectTimer) {
-    clearInterval(collectTimer)
-    collectTimer = null
+  const wasActive = collectTimer != null || collectAbortController != null
+  tearDownCollectScheduler()
+  consecutiveTimeoutCount = 0
+  if (wasActive) {
+    console.log('[MonitorTool] Collection stopped')
+    perfChainMain('stopCollecting', {
+      collectEpoch,
+      note: 'session ended or user stopped; no further collect_tick expected',
+    })
   }
-  console.log('[MonitorTool] Collection stopped')
 }
 
 /** 实时 UI 去掉超长 commandLine；保留 chromiumType 短字段便于展示 --type= 角色 */
@@ -1245,21 +1462,20 @@ function slimSnapshotForUiBroadcast(full: MemorySnapshot): MemorySnapshot {
 }
 
 function pushSnapshot(snapshot: MemorySnapshot): void {
-  // 缓存到缓冲区
+  const sessionActive = currentSession?.status === 'running'
+  if (!sessionActive) return
+
   snapshotsBuffer.push(snapshot)
 
   let diskWriteMs = 0
-  // 如果有正在进行的会话，写入磁盘
-  if (currentSession?.status === 'running') {
-    const sessionDataFile = path.join(storageDir, currentSession.dataFile)
-    try {
-      const d0 = Date.now()
-      fs.appendFileSync(sessionDataFile, JSON.stringify(snapshot) + '\n', 'utf-8')
-      diskWriteMs = Date.now() - d0
-      currentSession.snapshotCount++
-    } catch (err) {
-      console.error('[MonitorTool] Failed to write snapshot:', err)
-    }
+  const sessionDataFile = path.join(storageDir, currentSession!.dataFile)
+  try {
+    const d0 = Date.now()
+    fs.appendFileSync(sessionDataFile, JSON.stringify(snapshot) + '\n', 'utf-8')
+    diskWriteMs = Date.now() - d0
+    currentSession!.snapshotCount++
+  } catch (err) {
+    console.error('[MonitorTool] Failed to write snapshot:', err)
   }
 
   const s0 = Date.now()
@@ -1286,6 +1502,95 @@ function pushSnapshot(snapshot: MemorySnapshot): void {
   }
 }
 
+// ============ 附加到已有进程（替代启动 exe） ============
+
+interface AttachResult {
+  success: boolean
+  error?: string
+  info?: { pid: number; appName: string; exePath: string }
+  session?: TestSession
+}
+
+/**
+ * 附加到系统中已运行的进程进行监控。
+ * 与 launchTargetApp 的区别：不启动子进程，直接以目标 PID 为根枚举进程树。
+ */
+async function attachToProcess(pid: number, processInfo: SystemProcessListItem, customLabel?: string): Promise<AttachResult> {
+  perfChainMain('attachToProcess_begin', { pid })
+  try {
+    if (!isNativeMemoryLoaded()) {
+      return { success: false, error: 'C++ 原生模块未加载，无法附加监控。请执行 build:with-native 后重试。' }
+    }
+
+    // 目标进程可能已先退出：必须先停采集并清外部状态，否则 native gather 会卡住无法开始新会话
+    if (endSessionInProgress) {
+      return { success: false, error: '正在结束上一会话，请稍后再附加' }
+    }
+    tearDownCollectScheduler()
+    clearExternalMonitorState()
+    consecutiveTimeoutCount = 0
+
+    const appName = processInfo.name || `PID_${pid}`
+    const exePath = processInfo.exePath || ''
+
+    targetAppInfo = {
+      appName,
+      appPath: exePath,
+      startTime: new Date(), // 记录为"发现时间"而非启动时间
+    }
+
+    // 不再持有 execFile 子进程句柄 — 目标进程是外部的，退出由用户感知
+    targetAppProcess = null
+
+    // 设置根 PID 并立即枚举子树
+    monitoredRootPid = pid
+    privateWsCache = new Map()
+    privateWsLastRefresh = 0
+    lastExternalPerfSample = null
+    externalTotalExcludedPids = new Set()
+    externalPidsCache = [pid]
+    externalNamesCache = new Map([[pid, appName]])
+    externalExePathCache = new Map([[pid, exePath]])
+    externalCommandLineCache = new Map()
+    externalTreeLastRefresh = 0
+
+    // 同步枚举进程树
+    syncExternalProcessTreeFromNative(pid)
+    perfChainMain('attachToProcess_tree_applied', {
+      rootPid: pid,
+      pidCount: externalPidsCache.length,
+    })
+
+    // 自动新建测试会话（优先使用用户自定义名称）
+    const sessionLabel = customLabel?.trim() || `附加: ${appName} (PID ${pid})`
+    const session = await startSession(
+      sessionLabel,
+      `已运行进程: ${exePath || '未知路径'} (PID=${pid})`,
+    )
+    perfChainMain('attachToProcess_resolve', {
+      sessionId: session.id,
+      attachedPid: pid,
+      collectIntervalMs: CONFIG.collectInterval,
+    })
+
+    // 立即推一帧同步快照
+    try {
+      const immediateSnap = buildSnapshot()
+      pushSnapshot(immediateSnap)
+      console.log('[MonitorTool] attachToProcess: immediate snapshot pushed, seq=', immediateSnap.seq)
+    } catch (snapErr) {
+      console.error('[MonitorTool] attachToProcess: immediate sync snapshot failed:', snapErr)
+    }
+
+    return { success: true, info: { pid, appName, exePath }, session }
+  } catch (err) {
+    console.error('[MonitorTool] Failed to attach to process:', err)
+    targetAppInfo = null
+    clearExternalMonitorState()
+    return { success: false, error: String(err) }
+  }
+}
+
 // ============ 外部应用启动 ============
 
 interface LaunchAppResult {
@@ -1298,6 +1603,9 @@ interface LaunchAppResult {
 async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchAppResult> {
   perfChainMain('launchTargetApp_begin', { appPath })
   try {
+    // 重置采集链：防止旧进程退出后遗留的异步 gather 阻塞新快照
+    collectTickChain = Promise.resolve()
+
     const appName = path.basename(appPath).replace(/\.(exe|app|bat|sh)$/, '')
     targetAppInfo = {
       appName,
@@ -1319,6 +1627,10 @@ async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchA
         )
         targetAppProcess = null
         targetAppInfo = null
+        // 目标应用退出时自动结束正在运行的会话，避免采集器对着无效 PID 超时
+        if (currentSession?.status === 'running') {
+          void endSession()
+        }
         clearExternalMonitorState()
       })
 
@@ -1429,14 +1741,22 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('session:stop', async () => {
     try {
+      if (endSessionInProgress) {
+        return null
+      }
       if (currentSession?.status === 'running') {
         return await endSession()
       }
+      // 无运行中的会话时也要清理外部监控状态 + 停止残留定时器
+      stopCollecting()
+      clearExternalMonitorState()
       healStaleRunningSessionsInIndex('结束会话时主进程无活动会话')
       broadcastToRenderer('session:ended', { session: null, report: null })
       return null
     } catch (err) {
       console.error('[MonitorTool] session:stop 异常:', err)
+      stopCollecting()
+      clearExternalMonitorState()
       healStaleRunningSessionsInIndex('结束会话异常恢复')
       currentSession = null
       snapshotsBuffer = []
@@ -1534,9 +1854,35 @@ function registerIpcHandlers(): void {
     return true
   })
 
-  // ---- 外部应用启动 ----
+  // ---- 外部应用启动 / 附加到进程 ----
   ipcMain.handle('app:launch', async (_e, appPath: string, args: string[]) => {
     return launchTargetApp(appPath, args)
+  })
+
+  /** 枚举系统中全部进程（C++ Toolhelp32），用于「附加到已有进程」列表 */
+  ipcMain.handle('process:list-all', (): SystemProcessListItem[] => {
+    if (!isNativeMemoryLoaded()) {
+      console.warn('[MonitorTool] process:list-all: native module not loaded')
+      return []
+    }
+    return enumerateAllProcessesSync()
+  })
+
+  /**
+   * 附加到已运行的进程进行监控（替代 launchTargetApp 的 execFile 方式）。
+   * 前端先调 process:list-all 获取列表，用户选择后传入 pid。
+   */
+  ipcMain.handle('process:attach', async (_e, pid: number, label?: string) => {
+    if (!Number.isFinite(pid) || pid <= 0) {
+      return { success: false, error: '无效的 PID' }
+    }
+    const allProcesses = enumerateAllProcessesSync()
+    const proc = allProcesses.find((p) => p.pid === pid)
+    if (!proc) {
+      return { success: false, error: `PID ${pid} 未在当前进程列表中找到，可能已退出` }
+    }
+    // 将自定义 label 注入 processInfo，供 attachToProcess 使用
+    return attachToProcess(pid, proc, label)
   })
 
   ipcMain.handle('app:get-target', () => {
@@ -1620,22 +1966,38 @@ function registerIpcHandlers(): void {
         return { success: false, error: '用户取消' }
       }
 
-      const report = getSessionReport(sessionId)
-      // 直接读取文件导出完整数据
+      // 导出数据 = 报告页读到的原始文件，一字不差
+      const reportFile = path.join(storageDir, `${sessionId}.report.json`)
       const snapFile = path.join(storageDir, `${sessionId}.snapshots`)
-      let exportData: Record<string, unknown>
+
+      // 原样读取 report.json（报告页 session:get-report 读的就是它）
+      let reportData: Record<string, unknown> | null = null
+      if (fs.existsSync(reportFile)) {
+        try {
+          reportData = JSON.parse(fs.readFileSync(reportFile, 'utf-8'))
+        } catch { /* ignore */ }
+      }
+
+      // 原样读取 snapshots 文件（报告页 getSessionSnapshots 读的就是它）
+      let snapshotsRaw: string[] = []
       if (fs.existsSync(snapFile)) {
-        exportData = {
-          version: 1,
-          tool: 'Electron Memory Monitor Tool',
-          exportTime: new Date().toISOString(),
-          session,
-          report: report || null,
-          snapshotsCount: session.snapshotCount,
-          note: '完整的快照数据请查看原始 snapshots 文件',
-        }
-      } else {
-        exportData = { session, report: report || null }
+        const content = fs.readFileSync(snapFile, 'utf-8')
+        snapshotsRaw = content.trim().split('\n').filter(Boolean)
+      }
+      const snapshots = snapshotsRaw.map((line) => {
+        try { return JSON.parse(line) } catch { return null }
+      }).filter((x): x is NonNullable<typeof x> => x != null)
+
+      const exportData: Record<string, unknown> = {
+        version: 2,
+        tool: 'Electron Memory Monitor Tool',
+        exportTime: new Date().toISOString(),
+        session,
+        /** 与报告页 session:get-report 返回完全一致 */
+        report: reportData,
+        snapshotsCount: snapshots.length,
+        /** 与报告页 getSessionSnapshots 返回完全一致（每个元素是一个快照对象） */
+        snapshots,
       }
 
       fs.writeFileSync(result.filePath, JSON.stringify(exportData, null, 2), 'utf-8')
@@ -1685,8 +2047,7 @@ app.whenReady().then(() => {
     `[MonitorTool] 专用工作集采集后端: ${wsStatus.backend}${wsStatus.error ? ` (${wsStatus.error})` : ''}`,
   )
 
-  // 自动开始采集；测试会话由用户在界面「开始记录」或「启动并监控」创建
-  startCollecting()
+  // 空闲态不采集；由「开始记录」「附加并监控」「启动并监控」触发 startCollecting
 
   app.on('activate', () => {
     if (!mainWindow) createMainWindow()

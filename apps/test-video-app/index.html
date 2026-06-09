@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Video Background Test</title>
+  <style>
+    * { margin:0; padding:0; box-sizing: border-box; }
+
+    body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      position: relative;
+      background: #0a0a1a;
+    }
+
+    /* 背景视频样式（由 JS 动态创建时应用） */
+    .bg-video {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      z-index: 0;
+      background: #000;
+    }
+
+    /* 前景控制面板 */
+    .overlay {
+      position: relative;
+      z-index: 10;
+      width: 100%; height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      padding: 24px 20px;
+      background: linear-gradient(transparent 40%, rgba(0,0,0,0.65) 100%);
+      pointer-events: none;  /* 让点击穿透到视频层（如果有的话） */
+    }
+    .overlay > * { pointer-events: auto; }
+
+    h1 {
+      font-size: 18px;
+      color: rgba(255,255,255,0.85);
+      text-shadow: 0 1px 6px rgba(0,0,0,0.8);
+      margin-bottom: auto;
+      padding: 16px 4px 0;
+    }
+
+    .badge {
+      display: inline-block;
+      font-size: 12px;
+      background: rgba(233,69,96,0.7);
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+
+    .controls {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      padding-bottom: 8px;
+    }
+
+    button {
+      padding: 12px 28px;
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      color: #fff;
+      backdrop-filter: blur(10px);
+      min-width: 110px;
+      pointer-events: auto;
+    }
+    button:hover { transform: translateY(-1px); border-color: rgba(255,255,255,0.6); }
+
+    .btn-play    { background: rgba(15,52,96,0.75); }
+    .btn-pause   { background: rgba(83,52,131,0.75); }
+    .btn-destroy { background: rgba(233,69,96,0.75); }
+    .btn-gc      { background: rgba(255,255,255,0.12); font-size: 13px; min-width: 80px; }
+
+    .status {
+      text-align: center;
+      font-size: 12px;
+      color: rgba(255,255,255,0.45);
+      margin-top: 10px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 前景控制层（始终存在） -->
+  <div class="overlay">
+    <h1>🎬 Video Background Memory Test <span class="badge" id="videoBadge">无视频</span></h1>
+
+    <div class="controls">
+      <button class="btn-play"    onclick="playBg()">▶ 播放</button>
+      <button class="btn-pause"   onclick="pauseBg()">⏸ 暂停</button>
+      <button class="btn-destroy" onclick="destroyBg()">✕ 销毁视频</button>
+      <button class="btn-gc"      onclick="triggerGC()">🗑 GC</button>
+    </div>
+
+    <div class="status" id="status">就绪 — 窗口 1200×800，点击"播放"才会挂载视频</div>
+  </div>
+
+  <script>
+    const VIDEO_SRC = 'file:///C:/my-work/platform-launcher/apps/launcher/src/renderer/main-os/images/video/home.mp4'
+    const status  = document.getElementById('status')
+    const badge   = document.getElementById('videoBadge')
+
+    /** 获取当前 video 元素（动态创建的） */
+    function getVideo() {
+      return document.querySelector('.bg-video')
+    }
+
+    function log(msg) {
+      status.textContent = msg
+      console.log('[VideoTest]', msg)
+    }
+
+    function updateBadge(text, color) {
+      badge.textContent = text
+      badge.style.background = color || 'rgba(233,69,96,0.7)'
+    }
+
+    /** 动态创建并挂载 video 元素 */
+    function createVideoElement() {
+      if (getVideo()) return getVideo()  // 已存在
+
+      const video = document.createElement('video')
+      video.className = 'bg-video'
+      video.src      = VIDEO_SRC
+      video.loop     = true
+      video.muted    = true
+      video.playsInline = true
+      video.preload  = 'auto'
+
+      video.addEventListener('playing', () => {
+        log('视频开始播放')
+        updateBadge('播放中', 'rgba(15,52,96,0.7)')
+      })
+      video.addEventListener('pause', () => {
+        log('视频已暂停')
+        updateBadge('已暂停', 'rgba(255,165,0,0.7)')
+      })
+      video.addEventListener('error', (e) => {
+        log('视频加载错误: ' + e.message)
+        updateBadge('加载失败', 'rgba(233,69,96,0.7)')
+      })
+
+      document.body.insertBefore(video, document.querySelector('.overlay'))
+      log('视频元素已挂载到 DOM')
+      updateBadge('已挂载（暂停）', 'rgba(255,165,0,0.7)')
+      return video
+    }
+
+    function playBg() {
+      let video = getVideo()
+      if (!video) {
+        video = createVideoElement()
+      }
+      video.play().then(() => {
+        log('背景视频播放中')
+      }).catch(e => {
+        log('播放失败: ' + e.message)
+      })
+    }
+
+    function pauseBg() {
+      const video = getVideo()
+      if (video) {
+        video.pause()
+        log('背景视频已暂停')
+      } else {
+        log('没有已挂载的视频')
+      }
+    }
+
+    function destroyBg() {
+      const video = getVideo()
+      if (video) {
+        video.pause()
+        video.removeAttribute('src')
+        video.load()       // 释放解码器资源
+        video.remove()     // 从 DOM 移除
+        log('视频元素已从 DOM 销毁，GPU 内存应释放')
+        updateBadge('无视频', 'rgba(233,69,96,0.7)')
+      } else {
+        log('没有已挂载的视频可销毁')
+      }
+    }
+
+    function triggerGC() {
+      if (window.gc) {
+        window.gc()
+        log('已触发 GC (window.gc)')
+      } else {
+        log('GC 不可用，启动需加 --js-flags="--expose-gc"')
+      }
+    }
+
+    log('页面就绪 — 初始无视频挂载，点击"播放"才开始加载')
+  </script>
+</body>
+</html>

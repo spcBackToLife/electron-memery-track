@@ -29,6 +29,8 @@ export interface ProcessMemoryInfo {
     peakWorkingSetSize: number   // 峰值工作集 (KB)
     /** 专用工作集 (KB)，主进程写入；统计口径见 getEffectiveMemoryKB */
     privateWorkingSet?: number
+    /** 专用已提交 (KB)，Win32 PrivateUsage / Chromium privateBytes */
+    privateBytes?: number
   }
 }
 
@@ -39,6 +41,8 @@ export interface MemorySnapshot {
   processes: ProcessMemoryInfo[]
   /** 各进程有效内存之和 (KB)，有效值 = 专用工作集（若已采集）否则工作集 */
   totalWorkingSetSize: number
+  /** 各进程专用已提交之和 (KB)，口径见 getPrivateBytesKB */
+  totalPrivateBytes?: number
   system: {
     total: number                 // 系统总物理内存 (bytes)
     free: number                  // 可用 (bytes)
@@ -98,6 +102,7 @@ export interface ReportEventMark {
   browserKB: number
   rendererKB: number
   gpuKB: number
+  utilityKB: number
 }
 
 export interface ReportSummary {
@@ -120,8 +125,16 @@ export interface ReportSummary {
     peakBrowserMB: number
     /** 渲染进程峰值 (MB) */
     peakRendererMB: number
+    /** 辅助进程峰值 (MB) */
+    peakUtilityMB: number
     /** 进程数峰值 */
     peakProcessCount: number
+    /** 专用已提交峰值 (MB) */
+    peakTotalPrivateBytesMB?: number
+    /** 专用已提交均值 (MB) */
+    avgTotalPrivateBytesMB?: number
+    /** 专用已提交末值 (MB) */
+    finalTotalPrivateBytesMB?: number
   }
 
   trendAnalysis: {
@@ -135,9 +148,12 @@ export interface ReportSummary {
   dataPoints: Array<{
     timestamp: number
     totalMB: number
+    /** 专用已提交合计 (MB) */
+    totalPrivateBytesMB?: number
     browserMB: number
     rendererMB: number
     gpuMB: number
+    utilityMB: number
     processCount: number
     extCpuPercent?: number
     extDiskReadKBps?: number

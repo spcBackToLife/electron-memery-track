@@ -336,6 +336,15 @@ struct ProcSnapRow {
   std::wstring cmdLine;
 };
 
+/** System process lightweight snapshot item (for enumerateAllProcesses) */
+struct SystemProcessInfo {
+  DWORD pid;
+  DWORD parentPid;             /* PPID from Toolhelp32 th32ParentProcessID */
+  std::wstring name;
+  std::wstring exePath;
+  SIZE_T privateWorkingSetKB;  /* PrivateUsage / 1024 — matches Task Manager "Memory" column */
+};
+
 /** Toolhelp32 BFS + 每 PID OpenProcess 读镜像与命令行；供同步 enumerate 与 AsyncWorker 共用。 */
 static bool GatherSubtreeProcRows(DWORD rootPid, std::vector<ProcSnapRow>* out_rows) {
   out_rows->clear();
@@ -464,6 +473,71 @@ Napi::Value EnumerateProcessTreeNapi(const Napi::CallbackInfo& info) {
 #endif
 }
 
+/**
+ * Enumerate all running system processes (lightweight snapshot: PID / name / exe path / working set memory).
+ * Used for "attach to running process" process list. No BFS tree traversal, no command line reading.
+ */
+Napi::Value EnumerateAllProcessesNapi(const Napi::CallbackInfo& info) {
+  Napi::Env env = info.Env();
+  Napi::Array out = Napi::Array::New(env);
+
+#ifdef _WIN32
+  // Single snapshot: collect PID + PPID + name all at once
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return out;
+
+  PROCESSENTRY32W pe;
+  pe.dwSize = sizeof(pe);
+  std::vector<SystemProcessInfo> procList;
+
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      DWORD pid = pe.th32ProcessID;
+      if (pid == 0) continue;
+      SystemProcessInfo pi{};
+      pi.pid = pid;
+      pi.parentPid = pe.th32ParentProcessID;
+      pi.name = pe.szExeFile;   // name comes directly from snapshot — no second scan needed
+
+      HANDLE h = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
+      if (h) {
+        wchar_t buf[MAX_PATH] = {};
+        DWORD sz = MAX_PATH;
+        QueryFullProcessImageNameW(h, 0, buf, &sz);
+        pi.exePath = buf;
+
+        PROCESS_MEMORY_COUNTERS_EX pmc{};
+        pmc.cb = sizeof(pmc);
+        if (GetProcessMemoryInfo(h, (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
+          pi.privateWorkingSetKB = static_cast<SIZE_T>(pmc.PrivateUsage / 1024);
+        }
+        CloseHandle(h);
+      }
+
+      if (pi.exePath.empty() && !pi.name.empty()) {
+        pi.exePath = pi.name;
+      }
+      procList.push_back(std::move(pi));
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+
+  uint32_t idx = 0;
+  for (const auto& pi : procList) {
+    Napi::Object row = Napi::Object::New(env);
+    row.Set("pid", Napi::Number::New(env, (double)pi.pid));
+    row.Set("parentPid", Napi::Number::New(env, (double)pi.parentPid));
+    row.Set("name", Napi::String::New(env, WideToUtf8(pi.name.empty()
+      ? (pi.exePath.empty() ? L"Unknown" : pi.exePath) : pi.name)));
+    row.Set("exePath", Napi::String::New(env, WideToUtf8(pi.exePath)));
+    row.Set("privateWorkingSetKB", Napi::Number::New(env, static_cast<double>(pi.privateWorkingSetKB)));
+    out.Set(idx++, row);
+  }
+#endif
+
+  return out;
+}
+
 struct GatheredPidMetrics {
   DWORD pid;
   DWORD parentPid;
@@ -471,6 +545,7 @@ struct GatheredPidMetrics {
   std::string exePath;
   std::string cmdLine;
   double privKb;
+  double privateBytesKb;
   double wsKb;
   double peakKb;
   double userTime100ns;
@@ -517,6 +592,8 @@ class ExternalGatherMonitorWorker : public Napi::AsyncWorker {
       if (privKb <= 0) privKb = wsKb;
       if (peakKb <= 0) peakKb = wsKb;
       g.privKb = privKb;
+      g.privateBytesKb = std::floor(static_cast<double>(privU) / 1024.0);
+      if (g.privateBytesKb < 0) g.privateBytesKb = 0;
       g.wsKb = wsKb;
       g.peakKb = peakKb;
 
@@ -569,6 +646,7 @@ class ExternalGatherMonitorWorker : public Napi::AsyncWorker {
 
       Napi::Object m = Napi::Object::New(env);
       m.Set("privateKb", Napi::Number::New(env, g.privKb));
+      m.Set("privateBytesKb", Napi::Number::New(env, g.privateBytesKb));
       m.Set("workingSetKb", Napi::Number::New(env, g.wsKb));
       m.Set("peakKb", Napi::Number::New(env, g.peakKb));
       memory.Set(std::to_string(g.pid), m);
@@ -954,6 +1032,7 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
   exports.Set("batchGetPrivateWorkingSet", Napi::Function::New(env, BatchGetPrivateWorkingSetNapi));
   exports.Set("batchGetProcessMemory", Napi::Function::New(env, BatchGetProcessMemoryNapi));
   exports.Set("enumerateProcessTree", Napi::Function::New(env, EnumerateProcessTreeNapi));
+  exports.Set("enumerateAllProcesses", Napi::Function::New(env, EnumerateAllProcessesNapi));
   exports.Set("gatherExternalMonitorSnapshotAsync", Napi::Function::New(env, GatherExternalMonitorSnapshotAsyncNapi));
   exports.Set("batchGetProcessTimesAndIo", Napi::Function::New(env, BatchGetProcessTimesAndIoNapi));
   exports.Set("queryGpuSystemSnapshotAsync", Napi::Function::New(env, QueryGpuSystemSnapshotAsyncNapi));

@@ -21,7 +21,7 @@ export interface MonitorAPI {
   // 标记
   addMark: (label: string, metadata?: Record<string, unknown>) => Promise<boolean>
 
-  // 外部应用
+  // 外部应用 / 进程附加
   launchApp: (
     appPath: string,
     args?: string[],
@@ -36,6 +36,18 @@ export interface MonitorAPI {
     appPath: string
     startTime: string
   } | null>
+  /** 枚举系统中全部进程，返回 { pid, name, exePath, workingSetKB }[] */
+  listAllProcesses: () => Promise<unknown[]>
+  /**
+   * 附加到已有进程进行监控。
+   * 返回 { success, error?, info?: { pid, appName, exePath }, session? }
+   */
+  attachToProcess: (pid: number, label?: string) => Promise<{
+    success: boolean
+    error?: string
+    info?: { pid: number; appName: string; exePath: string }
+    session?: { id: string; label: string; status: string }
+  }>
   getExternalExcludedPids: () => Promise<number[]>
   setPidExcludedFromTotal: (pid: number, excluded: boolean) => Promise<boolean>
   resetTotalExclusion: () => Promise<boolean>

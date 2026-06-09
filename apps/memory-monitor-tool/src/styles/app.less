@@ -237,6 +237,202 @@ body {
   }
 }
 
+// Process Selector (Attach to running process)
+.process-selector-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.process-search-input-wrap {
+  position: relative;
+  flex: 1;
+
+  .process-search-input {
+    width: 100%;
+    padding: 8px 30px 8px 14px;
+    background: @bg-primary;
+    border: 1px solid @border-color;
+    border-radius: 6px;
+    color: @text-primary;
+    font-size: 13px;
+    outline: none;
+
+    &:focus { border-color: @accent; }
+    &::placeholder { color: @text-muted; }
+  }
+
+  .process-search-clear {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 20px;
+    height: 20px;
+    border: none;
+    background: transparent;
+    color: @text-muted;
+    cursor: pointer;
+    font-size: 12px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    &:hover { background: fade(@text-muted, 15%); color: @text-primary; }
+  }
+}
+
+.process-session-input {
+  width: 180px;
+  padding: 8px 12px;
+  background: @bg-primary;
+  border: 1px solid @border-color;
+  border-radius: 6px;
+  color: @text-primary;
+  font-size: 13px;
+  outline: none;
+
+  &:focus { border-color: @accent; }
+  &::placeholder { color: @text-muted; }
+}
+
+.process-list-dropdown {
+  margin-top: 8px;
+  max-height: 320px;
+  overflow-y: auto;
+  background: @bg-tertiary;
+  border: 1px solid @border-hover;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  &::-webkit-scrollbar { width: 5px; }
+  &::-webkit-scrollbar-track { background: transparent; }
+  &::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 3px; }
+}
+
+.process-list-empty {
+  padding: 16px;
+  text-align: center;
+  color: @text-muted;
+  font-size: 13px;
+}
+
+.process-list-more {
+  padding: 8px;
+  text-align: center;
+  color: @text-muted;
+  font-size: 11.5px;
+  border-top: 1px solid @border-color;
+}
+
+.process-list-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+
+  th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: @bg-secondary;
+    padding: 7px 10px;
+    text-align: left;
+    font-weight: 500;
+    color: @text-secondary;
+    border-bottom: 1px solid @border-color;
+    white-space: nowrap;
+    user-select: none;
+  }
+
+  td {
+    padding: 5px 10px;
+    color: @text-primary;
+    cursor: pointer;
+    transition: background 0.12s;
+    vertical-align: middle;
+  }
+
+  tbody tr {
+    &:hover { background: fade(@accent, 10%); }
+    &.selected {
+      background: fade(@accent, 18%);
+      box-shadow: inset 3px 0 0 @accent;
+      .col-mem { color: #52c41a; font-weight: 600; }
+      .proc-name-main { color: @accent; font-weight: 600; }
+    }
+  }
+
+  .col-pid { width: 72px; text-align: right; font-family: 'Consolas', 'Courier New', monospace; color: @text-muted !important; font-size: 11.5px; }
+  .col-name { min-width: 140px; max-width: 220px; }
+  .col-path { max-width: 280px; color: @text-muted; font-size: 11.5px; }
+  .col-mem { width: 90px; text-align: right; font-family: 'Consolas', monospace; white-space: nowrap; }
+
+  // Process name: two-line layout (main name + parent folder)
+  .proc-name-main {
+    display: block;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    &.root-name {
+      font-weight: 700;
+      color: #f5a623;
+    }
+  }
+  .proc-name-sub {
+    display: block;
+    font-size: 10.5px;
+    color: @text-muted;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 1px;
+    &.root-info {
+      color: #d48806;
+      font-weight: 500;
+    }
+  }
+
+  // Root process row
+  &.row-root {
+    background: fade(#f5a623, 4%);
+    border-bottom: 1px solid fade(@border-color, 50%);
+    &:hover { background: fade(#f5a623, 12%); }
+    &.selected { box-shadow: inset 3px 0 0 #f5a623; }
+  }
+
+  // Child process row — indented
+  &.row-child {
+    td.col-pid { padding-left: calc(70px + var(--indent-px, 0px)); }
+    td.col-name { padding-left: calc(10px + var(--indent-px, 0px)); }
+    td.col-path { color: #555; opacity: 0.75; }
+  }
+
+  // ROOT badge in PID column
+  .root-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    color: #fff;
+    background: #f5a623;
+    border-radius: 3px;
+    padding: 0 4px;
+    margin-right: 5px;
+    vertical-align: middle;
+    line-height: 15px;
+    letter-spacing: 0.5px;
+  }
+
+  // Family total memory (root row only)
+  .family-total {
+    margin-left: 5px;
+    font-size: 10px;
+    color: #d48806;
+    font-weight: 500;
+  }
+}
+
 .mmt-history-charts {
   background: @bg-secondary;
   border: 1px solid @border-color;
@@ -541,6 +737,33 @@ body {
 
 .mmt-process-table-container {
   overflow-x: auto;
+}
+
+// 隐藏 DevTools 开关（进程列表上方）
+.mmt-devtools-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  margin-bottom: 8px;
+
+  .mmt-devtools-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: @text-primary;
+    cursor: pointer;
+    user-select: none;
+
+    input[type="checkbox"] { margin: 0; }
+  }
+
+  .mmt-devtools-hint {
+    font-size: 11px;
+    color: @text-muted;
+    opacity: .6;
+  }
 }
 
 .mmt-process-table {

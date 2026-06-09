@@ -29,10 +29,21 @@ const api = {
   addMark: (label: string, metadata?: Record<string, unknown>) =>
     ipcRenderer.invoke('mark:add', label, metadata),
 
-  // ---- 外部应用 ----
+  // ---- 外部应用 / 进程附加 ----
   launchApp: (appPath: string, args?: string[]) =>
     ipcRenderer.invoke('app:launch', appPath, args || []),
   getTargetApp: () => ipcRenderer.invoke('app:get-target'),
+  /** 枚举系统中全部进程，用于「附加到已有进程」功能 */
+  listAllProcesses: (): Promise<unknown[]> =>
+    ipcRenderer.invoke('process:list-all'),
+  /** 附加到指定 PID 的已有进程进行监控，可选自定义会话名 */
+  attachToProcess: (pid: number, label?: string): Promise<{
+    success: boolean
+    error?: string
+    info?: { pid: number; appName: string; exePath: string }
+    session?: { id: string; label: string; status: string }
+  }> =>
+    ipcRenderer.invoke('process:attach', pid, label),
   getExternalExcludedPids: () => ipcRenderer.invoke('external:get-excluded-pids') as Promise<number[]>,
   setPidExcludedFromTotal: (pid: number, excluded: boolean) =>
     ipcRenderer.invoke('external:set-pid-excluded', pid, excluded) as Promise<boolean>,

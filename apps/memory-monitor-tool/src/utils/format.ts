@@ -12,6 +12,16 @@ export function getEffectiveMemoryKB(mem: {
   return mem.privateWorkingSet ?? mem.workingSetSize
 }
 
+/** 专用已提交 (KB)，无采集值时回退专用工作集 */
+export function getPrivateBytesKB(mem: {
+  workingSetSize: number
+  privateWorkingSet?: number
+  privateBytes?: number
+}): number {
+  if (mem.privateBytes != null && mem.privateBytes > 0) return mem.privateBytes
+  return mem.privateWorkingSet ?? mem.workingSetSize
+}
+
 /** 格式化 KB 为可读字符串 */
 export function formatKB(kb: number | undefined | null): string {
   if (kb == null || isNaN(kb)) return '0 KB'

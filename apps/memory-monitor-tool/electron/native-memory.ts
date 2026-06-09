@@ -22,6 +22,8 @@ interface NativeMemoryModule {
   batchGetProcessMemory(pids: number[]): Record<string, unknown>
   /** Windows：Toolhelp32 + QueryFullProcessImageName + NtQueryInformationProcess */
   enumerateProcessTree?(rootPid: number): unknown
+  /** Windows：枚举系统全部进程（轻量快照：PID/名称/exe路径/工作集KB），用于「附加到已有进程」 */
+  enumerateAllProcesses?(): unknown
   gatherExternalMonitorSnapshotAsync?(rootPid: number): Promise<unknown>
   /** Windows：GetProcessTimes + GetProcessIoCounters（原始累计值，主进程算间隔） */
   batchGetProcessTimesAndIo?(pids: number[]): Record<string, unknown>
@@ -122,6 +124,8 @@ function queryPrivateWorkingSetPowerShell(pids: number[]): Promise<Map<number, n
 /** 外部 exe 进程树：仅用 memory_native（C++）同步读数，与 batchGetPrivateWorkingSet / batchGetProcessMemory 一致 */
 export interface ExternalNativeMemoryRow {
   privateKb: number
+  /** Win32 PrivateUsage / 1024，对齐 Chromium privateBytes（专用已提交） */
+  privateBytesKb: number
   workingSetKb: number
   peakKb: number
 }
@@ -183,6 +187,51 @@ export interface ExternalGatheredSnapshotPayload {
   tree: NativeProcessTreeRow[]
   memory: Map<number, ExternalNativeMemoryRow>
   timesIo: Map<number, ProcessTimesIoRow>
+}
+
+/**
+ * 系统全部进程的轻量快照（供「附加到已有进程」列表使用）
+ */
+export interface SystemProcessListItem {
+  pid: number
+  parentPid: number
+  name: string
+  exePath: string
+  /** Private Working Set (KB) — equals Task Manager "Memory" column */
+  privateWorkingSetKB: number
+}
+
+/**
+ * 同步枚举系统中全部运行中的进程（C++ Toolhelp32 + OpenProcess）。
+ * 未加载 native 或非 Windows 时返回空数组。
+ */
+export function enumerateAllProcessesSync(): SystemProcessListItem[] {
+  if (!nativeModule || !IS_WINDOWS) return []
+  const mod = nativeModule
+  if (typeof mod.enumerateAllProcesses !== 'function') return []
+  try {
+    const raw = mod.enumerateAllProcesses() as unknown
+    if (!Array.isArray(raw)) return []
+    const out: SystemProcessListItem[] = []
+    for (const item of raw) {
+      if (item == null || typeof item !== 'object') continue
+      const o = item as Record<string, unknown>
+      const pid = typeof o.pid === 'number' ? o.pid : Number(o.pid)
+      if (!Number.isFinite(pid) || pid <= 0) continue
+      out.push({
+        pid: Math.floor(pid),
+        parentPid: typeof o.parentPid === 'number' ? Math.floor(o.parentPid) : 0,
+        name: typeof o.name === 'string' ? o.name : '',
+        exePath: typeof o.exePath === 'string' ? o.exePath : '',
+        privateWorkingSetKB: typeof o.privateWorkingSetKB === 'number' && Number.isFinite(o.privateWorkingSetKB)
+          ? Math.floor(o.privateWorkingSetKB) : 0,
+      })
+    }
+    return out
+  } catch (e) {
+    console.warn('[MonitorTool] enumerateAllProcessesSync failed:', e)
+    return []
+  }
 }
 
 /**
@@ -265,6 +314,8 @@ export function enumerateProcessTreeNativeSync(rootPid: number): NativeProcessTr
  * 在 Native AsyncWorker（libuv 线程池）中完成子树枚举 + 每 PID 内存与 Times/IO，避免阻塞主线程。
  * 旧版 .node 无导出时返回 null。
  */
+const GATHER_EXTERNAL_TIMEOUT_MS = 10000
+
 export async function gatherExternalMonitorSnapshotAsync(
   rootPid: number,
 ): Promise<ExternalGatheredSnapshotPayload | null> {
@@ -272,7 +323,12 @@ export async function gatherExternalMonitorSnapshotAsync(
   if (!mod || !IS_WINDOWS || !Number.isFinite(rootPid) || rootPid <= 0) return null
   if (typeof mod.gatherExternalMonitorSnapshotAsync !== 'function') return null
   try {
-    const raw = await mod.gatherExternalMonitorSnapshotAsync(Math.floor(rootPid))
+    const raw = await Promise.race([
+      mod.gatherExternalMonitorSnapshotAsync(Math.floor(rootPid)),
+      new Promise<null>((_, reject) =>
+        setTimeout(() => reject(new Error(`GATHER_TIMEOUT after ${GATHER_EXTERNAL_TIMEOUT_MS}ms`)), GATHER_EXTERNAL_TIMEOUT_MS),
+      ),
+    ])
     if (raw == null || typeof raw !== 'object') return null
     const root = raw as Record<string, unknown>
     const treeRaw = root.tree
@@ -314,10 +370,12 @@ export async function gatherExternalMonitorSnapshotAsync(
         if (v == null || typeof v !== 'object') continue
         const m = v as Record<string, unknown>
         const privKb = Number(m.privateKb)
+        const privateBytesKb = Number(m.privateBytesKb)
         const wsKb = Number(m.workingSetKb)
         const peakKb = Number(m.peakKb)
         memoryAll.set(pid, {
           privateKb: Number.isFinite(privKb) ? privKb : 0,
+          privateBytesKb: Number.isFinite(privateBytesKb) ? privateBytesKb : 0,
           workingSetKb: Number.isFinite(wsKb) ? wsKb : 0,
           peakKb: Number.isFinite(peakKb) ? peakKb : Number.isFinite(wsKb) ? wsKb : 0,
         })
@@ -356,7 +414,12 @@ export async function gatherExternalMonitorSnapshotAsync(
 
     return { tree: treeOut, memory, timesIo }
   } catch (e) {
-    console.warn('[MonitorTool] gatherExternalMonitorSnapshotAsync failed:', e)
+    const msg = e instanceof Error ? e.message : String(e)
+    if (msg.includes('GATHER_TIMEOUT')) {
+      console.warn('[MonitorTool] gatherExternalMonitorSnapshotAsync timeout (root may have exited):', rootPid)
+    } else {
+      console.warn('[MonitorTool] gatherExternalMonitorSnapshotAsync failed:', e)
+    }
     return null
   }
 }
@@ -382,8 +445,10 @@ export function readExternalProcessMemoryNativeSync(pids: number[]): Map<number,
       const o = detailObj[key]
       const wsKb = o ? Math.max(0, Math.floor((o.workingSetSize ?? 0) / 1024)) : 0
       const peakKb = o ? Math.max(0, Math.floor((o.peakWorkingSetSize ?? 0) / 1024)) : wsKb
+      const privateBytesKb = o ? Math.max(0, Math.floor((o.privateUsage ?? 0) / 1024)) : 0
       map.set(pid, {
         privateKb: privKb > 0 ? privKb : wsKb,
+        privateBytesKb,
         workingSetKb: wsKb,
         peakKb: peakKb > 0 ? peakKb : wsKb,
       })
