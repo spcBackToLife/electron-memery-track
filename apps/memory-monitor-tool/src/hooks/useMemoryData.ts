@@ -54,7 +54,9 @@ export function useMemoryData(): MemoryData {
 
     const sessionEndCleanup = window.monitorAPI.onSessionEnded(() => {
       setCurrentSession(null)
-      // 不清空 snapshots，便于查看刚结束会话的曲线
+      // 清空实时缓冲，避免下一会话仍显示上一会话曲线（误以为卡住）
+      setSnapshots([])
+      snapshotsRef.current = []
     })
 
     return () => {

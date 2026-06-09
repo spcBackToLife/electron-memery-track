@@ -15,6 +15,7 @@
         "scenario": "node scripts/scenario-runner.mjs",
         "scenario:launcher": "node scripts/scenario-runner.mjs scripts/scenarios/launcher-nav.scenario.json",
         "scenario:check-cdp": "node scripts/check-cdp.mjs",
+        "scenario:from-playwright": "node scripts/playwright-to-scenario.mjs",
         "scenario:codegen": "node scripts/scenario-record.mjs",
         "scenario:batch": "node scripts/run-batch.mjs"
     },

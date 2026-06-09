@@ -5,6 +5,7 @@ import MemoryTrendChart from '../components/MemoryTrendChart'
 import ExternalPerfTrendCharts from '../components/ExternalPerfTrendCharts'
 import MemoryDistributionPie from '../components/MemoryDistributionPie'
 import SessionControl from '../components/SessionControl'
+import AutomationBatchPanel from '../components/AutomationBatchPanel'
 import { useSession } from '../hooks/useSession'
 import { useToast } from '../context/ToastContext'
 import type { MemoryData } from '../hooks/useMemoryData'
@@ -519,6 +520,8 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
           </div>
         )}
       </div>
+
+      <AutomationBatchPanel />
 
       {/* 会话控制 */}
       <SessionControl

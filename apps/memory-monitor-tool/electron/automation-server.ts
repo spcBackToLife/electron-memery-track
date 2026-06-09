@@ -16,9 +16,18 @@ export interface AutomationStatus {
   externalRootPid: number | null
 }
 
+export interface LaunchMonitorBody {
+  appPath: string
+  args?: string[]
+  cdpPort?: number
+}
+
 export interface AutomationServerDeps {
   queueMark: (label: string, metadata?: Record<string, unknown>) => void
   getStatus: () => AutomationStatus
+  endSession?: () => Promise<unknown>
+  launchMonitor?: (body: LaunchMonitorBody) => Promise<{ ok: boolean; error?: string; sessionId?: string }>
+  killTarget?: () => Promise<void>
 }
 
 let server: http.Server | null = null
@@ -82,6 +91,42 @@ export function startAutomationServer(deps: AutomationServerDeps, preferredPort?
 
         if (method === 'GET' && url.pathname === '/api/status') {
           sendJson(res, 200, deps.getStatus())
+          return
+        }
+
+        if (method === 'POST' && url.pathname === '/api/session/stop') {
+          if (!deps.endSession) {
+            sendJson(res, 501, { ok: false, error: 'endSession not configured' })
+            return
+          }
+          await deps.endSession()
+          sendJson(res, 200, { ok: true })
+          return
+        }
+
+        if (method === 'POST' && url.pathname === '/api/launch-monitor') {
+          if (!deps.launchMonitor) {
+            sendJson(res, 501, { ok: false, error: 'launchMonitor not configured' })
+            return
+          }
+          const body = (await readJsonBody(req)) as LaunchMonitorBody
+          const appPath = typeof body.appPath === 'string' ? body.appPath.trim() : ''
+          if (!appPath) {
+            sendJson(res, 400, { ok: false, error: 'appPath is required' })
+            return
+          }
+          const result = await deps.launchMonitor(body)
+          sendJson(res, result.ok ? 200 : 500, result)
+          return
+        }
+
+        if (method === 'POST' && url.pathname === '/api/target/kill') {
+          if (!deps.killTarget) {
+            sendJson(res, 501, { ok: false, error: 'killTarget not configured' })
+            return
+          }
+          await deps.killTarget()
+          sendJson(res, 200, { ok: true })
           return
         }
 

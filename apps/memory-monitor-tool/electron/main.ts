@@ -9,7 +9,7 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import {
   createPrivateWsProvider,
   getNativeModuleStatus,
@@ -33,7 +33,9 @@ import {
   getAutomationServerPort,
   startAutomationServer,
   stopAutomationServer,
+  type LaunchMonitorBody,
 } from './automation-server'
+import { runAutomationBatch, type AutomationBatchOptions } from './automation-batch'
 import {
   computeResourceSummaryFromDataPoints,
   type ResourceSummaryPayload,
@@ -160,6 +162,8 @@ let consecutiveTimeoutCount = 0
 const MAX_CONSECUTIVE_TIMEOUTS = 2
 /** 防止 endSession 落盘期间 currentSession 仍为 running，导致超时 tick 重复进入 endSession */
 let endSessionInProgress = false
+/** 批量自动化是否进行中 */
+let automationBatchRunning = false
 
 /** 存储目录 */
 let storageDir: string
@@ -251,6 +255,38 @@ function maybeRefreshExternalTree(): void {
   void fetchWindowsProcessTree(root).then((result) => {
     applyExternalTreeFetchResult(root, result.pids, result.names, result.exePath, result.commandLine)
   })
+}
+
+/** 结束会话 / 批量轮次间：重置采集运行时缓存，便于下一次附加或启动 */
+function resetMonitorRuntimeState(): void {
+  pendingMarks = []
+  privateWsCache = new Map()
+  privateWsLastRefresh = 0
+  lastExternalPerfSample = null
+  consecutiveTimeoutCount = 0
+  collectTickChain = Promise.resolve()
+}
+
+/** 结束目标应用进程树（launch 子进程或已附加的根 PID） */
+async function killMonitoredTargetApp(): Promise<void> {
+  const rootPid = monitoredRootPid
+  if (targetAppProcess && !targetAppProcess.killed) {
+    const pid = targetAppProcess.pid
+    try {
+      if (process.platform === 'win32' && pid) {
+        spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+      } else {
+        targetAppProcess.kill()
+      }
+    } catch { /* ignore */ }
+    targetAppProcess = null
+  } else if (process.platform === 'win32' && rootPid != null && rootPid > 0) {
+    try {
+      spawn('taskkill', ['/PID', String(rootPid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
+    } catch { /* ignore */ }
+  }
+  await new Promise((r) => setTimeout(r, 1500))
+  clearExternalMonitorState()
 }
 
 /** 仅清理外部进程树状态，不启停采集定时器 */
@@ -870,7 +906,7 @@ async function endSession(): Promise<TestSession | null> {
   try {
     stopCollecting()
     clearExternalMonitorState()
-    collectTickChain = Promise.resolve()
+    resetMonitorRuntimeState()
 
     const endedRef = currentSession
     const buffer = [...snapshotsBuffer]
@@ -1543,6 +1579,7 @@ async function attachToProcess(pid: number, processInfo: SystemProcessListItem, 
       return { success: false, error: '正在结束上一会话，请稍后再附加' }
     }
     tearDownCollectScheduler()
+    resetMonitorRuntimeState()
     clearExternalMonitorState()
     consecutiveTimeoutCount = 0
 
@@ -1616,7 +1653,7 @@ interface LaunchAppResult {
   session?: TestSession
 }
 
-async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchAppResult> {
+async function launchTargetApp(appPath: string, args: string[], customSessionLabel?: string): Promise<LaunchAppResult> {
   perfChainMain('launchTargetApp_begin', { appPath })
   try {
     // 重置采集链：防止旧进程退出后遗留的异步 gather 阻塞新快照
@@ -1697,7 +1734,7 @@ async function launchTargetApp(appPath: string, args: string[]): Promise<LaunchA
       }
 
       // 为本次「启动并监控」自动新开测试会话（会 await 结束当前运行中的会话并落盘）
-      void startSession(`启动: ${appName}`, `可执行文件: ${appPath}`).then(
+      void startSession(customSessionLabel ?? `启动: ${appName}`, `可执行文件: ${appPath}`).then(
         (session) => {
           perfChainMain('launchTargetApp_resolve', {
             sessionId: session.id,
@@ -1757,7 +1794,19 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('session:stop', async () => {
     try {
+      const waitDeadline = Date.now() + 60_000
+      while (endSessionInProgress && Date.now() < waitDeadline) {
+        await new Promise((r) => setTimeout(r, 100))
+      }
       if (endSessionInProgress) {
+        console.warn('[MonitorTool] session:stop: endSession 仍在进行，强制重置采集状态')
+        stopCollecting()
+        resetMonitorRuntimeState()
+        clearExternalMonitorState()
+        currentSession = null
+        snapshotsBuffer = []
+        endSessionInProgress = false
+        broadcastToRenderer('session:ended', { session: null, report: null })
         return null
       }
       if (currentSession?.status === 'running') {
@@ -1870,6 +1919,61 @@ function registerIpcHandlers(): void {
     baseUrl: getAutomationBaseUrl(),
     port: getAutomationServerPort(),
   }))
+
+  ipcMain.handle('automation:run-batch', async (_e, opts: AutomationBatchOptions) => {
+    if (automationBatchRunning) {
+      return { ok: false, error: '批量自动化正在进行中' }
+    }
+    if (!opts?.appPath?.trim()) {
+      return { ok: false, error: '请提供 appPath' }
+    }
+    automationBatchRunning = true
+    try {
+      const result = await runAutomationBatch(opts, {
+        launchApp: (appPath, args, sessionLabel) => launchTargetApp(appPath, args, sessionLabel),
+        endSession: () => endSession(),
+        killTarget: () => killMonitoredTargetApp(),
+        resetRuntime: () => {
+          stopCollecting()
+          resetMonitorRuntimeState()
+          clearExternalMonitorState()
+        },
+        isSessionRunning: () => currentSession?.status === 'running',
+        onProgress: (p) => {
+          console.log(`[Batch][${p.phase}] ${p.message}`)
+          broadcastToRenderer('automation:progress', p)
+        },
+      })
+      return { ok: true, ...result }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    } finally {
+      automationBatchRunning = false
+      stopCollecting()
+      resetMonitorRuntimeState()
+      clearExternalMonitorState()
+      targetAppProcess = null
+    }
+  })
+
+  ipcMain.handle('automation:convert-playwright', async (_e, payload: { source: string; stepDelayMs?: number }) => {
+    const source = payload?.source?.trim()
+    if (!source) return { ok: false, error: 'source 为空' }
+    try {
+      const { pathToFileURL } = await import('url')
+      const modPath = path.join(__dirname_electron, '../scripts/playwright-to-scenario.mjs')
+      const mod = await import(pathToFileURL(modPath).href)
+      const stepDelay = payload.stepDelayMs ?? 5000
+      const scenario = mod.convertPlaywrightSource(source, 'converted', stepDelay)
+      const rel = 'scripts/scenarios/converted.scenario.json'
+      const abs = path.join(__dirname_electron, '..', rel)
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+      await fs.promises.writeFile(abs, JSON.stringify(scenario, null, 2), 'utf-8')
+      return { ok: true, scenarioPath: rel, stepCount: scenario.steps?.length ?? 0 }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
 
   // ---- 外部应用启动 / 附加到进程 ----
   ipcMain.handle('app:launch', async (_e, appPath: string, args: string[]) => {
@@ -2069,6 +2173,20 @@ app.whenReady().then(() => {
       externalMonitor: monitoredRootPid != null,
       externalRootPid: monitoredRootPid,
     }),
+    endSession: () => endSession(),
+    launchMonitor: async (body: LaunchMonitorBody) => {
+      const port = body.cdpPort ?? 9222
+      const extra = Array.isArray(body.args) ? body.args : []
+      const args = [
+        `--remote-debugging-port=${port}`,
+        '--remote-allow-origins=*',
+        ...extra.filter((a) => !String(a).startsWith('--remote-debugging-port=')),
+      ]
+      const r = await launchTargetApp(body.appPath, args)
+      if (!r.success) return { ok: false, error: r.error ?? 'launch failed' }
+      return { ok: true, sessionId: r.session?.id }
+    },
+    killTarget: () => killMonitoredTargetApp(),
   }).catch((e) => {
     console.warn('[MonitorTool] 自动化 API 启动失败:', e)
   })

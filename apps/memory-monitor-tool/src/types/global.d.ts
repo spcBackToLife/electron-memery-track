@@ -60,6 +60,27 @@ export interface MonitorAPI {
   diagAppend: (row: Record<string, unknown>) => void
   getDiagLogPath: () => Promise<string | null>
   getAutomationInfo: () => Promise<{ baseUrl: string | null; port: number | null }>
+  runAutomationBatch: (opts: {
+    appPath: string
+    scenarioPath: string
+    repeats?: number
+    stepDelayMs?: number
+    warmupBeforeScenarioMs?: number
+    betweenRunsMs?: number
+    cdpPort?: number
+  }) => Promise<{ ok: boolean; error?: string; completed?: number; errors?: string[] }>
+  convertPlaywright: (payload: { source: string; stepDelayMs?: number }) => Promise<{
+    ok: boolean
+    error?: string
+    scenarioPath?: string
+    stepCount?: number
+  }>
+  onAutomationProgress: (callback: (data: {
+    phase: string
+    message: string
+    runIndex: number
+    totalRuns: number
+  }) => void) => () => void
 
   // 事件监听
   onSnapshotUpdate: (callback: (data: unknown) => void) => () => void

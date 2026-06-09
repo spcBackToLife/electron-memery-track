@@ -62,6 +62,28 @@ const api = {
   getAutomationInfo: () =>
     ipcRenderer.invoke('automation:get-info') as Promise<{ baseUrl: string | null; port: number | null }>,
 
+  runAutomationBatch: (opts: Record<string, unknown>) =>
+    ipcRenderer.invoke('automation:run-batch', opts) as Promise<{
+      ok: boolean
+      error?: string
+      completed?: number
+      errors?: string[]
+    }>,
+
+  convertPlaywright: (payload: { source: string; stepDelayMs?: number }) =>
+    ipcRenderer.invoke('automation:convert-playwright', payload) as Promise<{
+      ok: boolean
+      error?: string
+      scenarioPath?: string
+      stepCount?: number
+    }>,
+
+  onAutomationProgress: (callback: (data: unknown) => void) => {
+    const handler = (_event: unknown, data: unknown) => callback(data)
+    ipcRenderer.on('automation:progress', handler)
+    return () => ipcRenderer.removeListener('automation:progress', handler)
+  },
+
   // ---- 事件监听（主进程 -> 渲染进程） ----
   onSnapshotUpdate: (callback: (snapshot: unknown) => void) => {
     const handler = (_event: unknown, data: unknown) => callback(data)
