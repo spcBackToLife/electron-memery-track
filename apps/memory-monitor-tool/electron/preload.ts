@@ -58,6 +58,10 @@ const api = {
   diagAppend: (row: Record<string, unknown>) => ipcRenderer.send('diag:append', row),
   getDiagLogPath: () => ipcRenderer.invoke('diag:get-log-path') as Promise<string | null>,
 
+  /** Playwright 场景脚本用的本地 HTTP API（mark / status） */
+  getAutomationInfo: () =>
+    ipcRenderer.invoke('automation:get-info') as Promise<{ baseUrl: string | null; port: number | null }>,
+
   // ---- 事件监听（主进程 -> 渲染进程） ----
   onSnapshotUpdate: (callback: (snapshot: unknown) => void) => {
     const handler = (_event: unknown, data: unknown) => callback(data)

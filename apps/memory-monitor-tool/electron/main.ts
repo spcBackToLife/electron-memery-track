@@ -29,6 +29,12 @@ import { fetchWindowsProcessTree } from './external-process-tree'
 import { queryGpuSystemSnapshotCached } from './external-gpu-metrics'
 import { perfChainMain, writeDiagNdjson, getDiagLogPath } from './diag-log'
 import {
+  getAutomationBaseUrl,
+  getAutomationServerPort,
+  startAutomationServer,
+  stopAutomationServer,
+} from './automation-server'
+import {
   computeResourceSummaryFromDataPoints,
   type ResourceSummaryPayload,
 } from '../src/utils/reportResourceSummary'
@@ -459,6 +465,16 @@ function formatKB(kb: number): string {
  */
 function getEffectiveMemoryKB(mem: ProcessMemoryInfo['memory']): number {
   return mem.privateWorkingSet ?? mem.workingSetSize
+}
+
+function queueEventMark(label: string, metadata?: Record<string, unknown>): void {
+  const trimmed = label.trim()
+  if (!trimmed) return
+  pendingMarks.push({
+    timestamp: Date.now(),
+    label: trimmed,
+    metadata,
+  })
 }
 
 function getPrivateBytesKB(mem: ProcessMemoryInfo['memory']): number {
@@ -1846,13 +1862,14 @@ function registerIpcHandlers(): void {
 
   // ---- 标记 ----
   ipcMain.handle('mark:add', (_e, label: string, metadata?: Record<string, unknown>) => {
-    pendingMarks.push({
-      timestamp: Date.now(),
-      label,
-      metadata,
-    })
+    queueEventMark(label, metadata)
     return true
   })
+
+  ipcMain.handle('automation:get-info', () => ({
+    baseUrl: getAutomationBaseUrl(),
+    port: getAutomationServerPort(),
+  }))
 
   // ---- 外部应用启动 / 附加到进程 ----
   ipcMain.handle('app:launch', async (_e, appPath: string, args: string[]) => {
@@ -2042,6 +2059,20 @@ app.whenReady().then(() => {
   registerIpcHandlers()
   createMainWindow()
 
+  void startAutomationServer({
+    queueMark: queueEventMark,
+    getStatus: () => ({
+      sessionRunning: currentSession?.status === 'running',
+      sessionId: currentSession?.id ?? null,
+      sessionLabel: currentSession?.label ?? null,
+      collecting: collectTimer != null,
+      externalMonitor: monitoredRootPid != null,
+      externalRootPid: monitoredRootPid,
+    }),
+  }).catch((e) => {
+    console.warn('[MonitorTool] 自动化 API 启动失败:', e)
+  })
+
   const wsStatus = getNativeModuleStatus()
   console.log(
     `[MonitorTool] 专用工作集采集后端: ${wsStatus.backend}${wsStatus.error ? ` (${wsStatus.error})` : ''}`,
@@ -2069,6 +2100,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  stopAutomationServer()
   stopCollecting()
   if (currentSession?.status === 'running') {
     void endSession()

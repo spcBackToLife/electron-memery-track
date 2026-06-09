@@ -1,0 +1,22 @@
+{
+  "name": "example-baseline",
+  "description": "示例：预热 → baseline → 点击 → 观察。请用 scenario:codegen 录制后把步骤贴进 steps，或引用 recorded.js",
+  "cdpUrl": "http://127.0.0.1:9222",
+  "mmtApiUrl": "http://127.0.0.1:39271",
+  "pageUrlIncludes": "",
+  "requireMmtSession": true,
+  "steps": [
+    { "type": "mark", "label": "warmup-start" },
+    { "type": "wait", "ms": 180000, "note": "预热 3 分钟，等 GPU/资源稳定" },
+    { "type": "mark", "label": "baseline" },
+    {
+      "type": "click",
+      "note": "把 codegen 录到的选择器填到 locator；或删掉本步改用 module",
+      "locator": { "kind": "testId", "value": "open-video" },
+      "timeout": 30000
+    },
+    { "type": "mark", "label": "after-open-video" },
+    { "type": "wait", "ms": 60000 },
+    { "type": "mark", "label": "scenario-end" }
+  ]
+}

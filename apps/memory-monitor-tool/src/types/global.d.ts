@@ -59,6 +59,7 @@ export interface MonitorAPI {
   /** 诊断 NDJSON 写入 userData/mmt-diag.log */
   diagAppend: (row: Record<string, unknown>) => void
   getDiagLogPath: () => Promise<string | null>
+  getAutomationInfo: () => Promise<{ baseUrl: string | null; port: number | null }>
 
   // 事件监听
   onSnapshotUpdate: (callback: (data: unknown) => void) => () => void
