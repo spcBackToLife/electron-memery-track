@@ -1,5 +1,6 @@
 import type { MemorySnapshot, ReportEventMark, ReportSummary } from '../types'
 import { getEffectiveMemoryKB } from './format'
+import { collectReportEventMarksFromSnapshots } from './reportEventMarks'
 import type { ComparePidSelection } from './comparePidMetrics'
 import {
   describeProcessIdentity,
@@ -25,12 +26,14 @@ export interface BatchSeriesMeta {
 }
 
 export interface BatchMultiRunPoint {
-  pct: number
+  /** 会话开始后经过的秒数（与各轮快照、mark 的 timestamp 同源） */
+  elapsedSec: number
   [key: string]: number | string | null
 }
 
-export interface BatchMarkAtPct {
-  pct: number
+export interface BatchMarkRef {
+  /** 该会话内 mark 发生时刻：相对会话开始的秒数 */
+  elapsedSec: number
   label: string
   sessionId: string
   sessionLabel: string
@@ -40,8 +43,6 @@ const RUN_COLORS = [
   '#646cff', '#fa8c16', '#52c41a', '#eb2f96', '#13c2c2',
   '#f5a623', '#ff6b6b', '#2f54eb', '#a0d911', '#9254de',
 ]
-
-const PCT_BUCKETS = 101
 
 /** 折线图 dataKey（用 sessionId，排除轮次后仍唯一） */
 export function runSeriesKey(sessionId: string): string {
@@ -53,6 +54,24 @@ export function chartLegendLabel(sessionLabel: string): string {
   const t = sessionLabel.trim()
   if (t.length <= 56) return t
   return `${t.slice(0, 54)}…`
+}
+
+/** 横轴刻度：与会话内经过时间一致 */
+export function formatElapsedAxis(sec: number): string {
+  if (!Number.isFinite(sec) || sec < 0) return '0s'
+  if (sec < 60) return `${Math.round(sec * 10) / 10}s`
+  const m = Math.floor(sec / 60)
+  const s = Math.round(sec % 60)
+  return `${m}:${s.toString().padStart(2, '0')}`
+}
+
+function sessionStartTs(run: BatchRunLoaded): number {
+  if (run.snapshots.length > 0) return run.snapshots[0]!.timestamp
+  return run.report.startTime
+}
+
+function elapsedSecFromTs(t0: number, ts: number): number {
+  return Math.round(((ts - t0) / 1000) * 10) / 10
 }
 
 function memSumByIdentity(sn: MemorySnapshot, key: string): number {
@@ -71,76 +90,144 @@ function seriesForSelection(snaps: MemorySnapshot[], selection: ComparePidSelect
   return snaps.map((s) => memSumByIdentity(s, selection))
 }
 
-function resampleToPct(values: number[]): number[] {
-  if (values.length === 0) return Array(PCT_BUCKETS).fill(0)
-  if (values.length === 1) return Array(PCT_BUCKETS).fill(values[0]!)
+interface TimeValuePoint {
+  t: number
+  v: number
+}
+
+function buildTimeValueSeries(run: BatchRunLoaded, values: number[]): TimeValuePoint[] {
+  const t0 = sessionStartTs(run)
+  return run.snapshots.map((s, i) => ({
+    t: elapsedSecFromTs(t0, s.timestamp),
+    v: values[i] ?? 0,
+  }))
+}
+
+function interpolateAt(series: TimeValuePoint[], t: number): number | null {
+  if (series.length === 0) return null
+  if (t < series[0]!.t || t > series[series.length - 1]!.t) return null
+  for (let i = 0; i < series.length - 1; i++) {
+    const a = series[i]!
+    const b = series[i + 1]!
+    if (t >= a.t && t <= b.t) {
+      if (b.t === a.t) return a.v
+      const ratio = (t - a.t) / (b.t - a.t)
+      return Math.round((a.v + (b.v - a.v) * ratio) * 10) / 10
+    }
+  }
+  return series[series.length - 1]!.v
+}
+
+function maxElapsedSec(runs: BatchRunLoaded[]): number {
+  let max = 0
+  for (const r of runs) {
+    if (r.snapshots.length < 2) {
+      max = Math.max(max, r.report.durationMs / 1000)
+      continue
+    }
+    const t0 = sessionStartTs(r)
+    const end = r.snapshots[r.snapshots.length - 1]!.timestamp
+    max = Math.max(max, (end - t0) / 1000)
+  }
+  return Math.max(1, max)
+}
+
+function buildTimeGrid(maxSec: number): number[] {
+  const step = maxSec > 300 ? 5 : maxSec > 120 ? 2 : 1
+  const count = Math.min(400, Math.max(40, Math.ceil(maxSec / step)))
   const out: number[] = []
-  for (let pct = 0; pct < PCT_BUCKETS; pct++) {
-    const pos = (pct / 100) * (values.length - 1)
-    const lo = Math.floor(pos)
-    const hi = Math.ceil(pos)
-    const t = pos - lo
-    const a = values[lo] ?? 0
-    const b = values[hi] ?? a
-    out.push(Math.round((a + (b - a) * t) * 10) / 10)
+  for (let i = 0; i <= count; i++) {
+    out.push(Math.round((i / count) * maxSec * 10) / 10)
   }
   return out
 }
 
-function buildPctPoints(
+function buildElapsedPoints(
   runs: BatchRunLoaded[],
   valueFn: (run: BatchRunLoaded) => number[],
-): { points: BatchMultiRunPoint[]; series: BatchSeriesMeta[] } {
+): { points: BatchMultiRunPoint[]; series: BatchSeriesMeta[]; maxElapsedSec: number } {
   const series: BatchSeriesMeta[] = runs.map((r, i) => ({
     key: runSeriesKey(r.sessionId),
     label: chartLegendLabel(r.label),
     color: RUN_COLORS[i % RUN_COLORS.length]!,
   }))
 
-  const resampled = runs.map((r) => resampleToPct(valueFn(r)))
-  const points: BatchMultiRunPoint[] = []
-  for (let pct = 0; pct < PCT_BUCKETS; pct++) {
-    const row: BatchMultiRunPoint = { pct }
+  const maxSec = maxElapsedSec(runs)
+  const grid = buildTimeGrid(maxSec)
+  const runSeries = runs.map((r) => buildTimeValueSeries(r, valueFn(r)))
+
+  const points: BatchMultiRunPoint[] = grid.map((elapsedSec) => {
+    const row: BatchMultiRunPoint = { elapsedSec }
     runs.forEach((r, ri) => {
-      row[runSeriesKey(r.sessionId)] = resampled[ri]![pct] ?? null
+      row[runSeriesKey(r.sessionId)] = interpolateAt(runSeries[ri]!, elapsedSec)
     })
-    points.push(row)
-  }
-  return { points, series }
+    return row
+  })
+
+  return { points, series, maxElapsedSec: maxSec }
 }
 
 export function buildBatchAggregateMemoryPoints(runs: BatchRunLoaded[]) {
-  return buildPctPoints(runs, (r) => seriesForSelection(r.snapshots, 'aggregate'))
+  return buildElapsedPoints(runs, (r) => seriesForSelection(r.snapshots, 'aggregate'))
 }
 
 export function buildBatchProcessMemoryPoints(
   runs: BatchRunLoaded[],
   identityKey: ComparePidSelection,
 ) {
-  return buildPctPoints(runs, (r) => seriesForSelection(r.snapshots, identityKey))
+  return buildElapsedPoints(runs, (r) => seriesForSelection(r.snapshots, identityKey))
 }
 
 export type BatchResourceMetric = 'cpu' | 'diskRead' | 'diskWrite' | 'gpu' | 'vram'
 
-function resourceSeriesFromReport(report: ReportSummary, metric: BatchResourceMetric): number[] {
-  const pts = report.dataPoints.filter((p) => p.extCpuPercent !== undefined)
+function resourceTimeSeries(run: BatchRunLoaded, metric: BatchResourceMetric): TimeValuePoint[] {
+  const pts = run.report.dataPoints.filter((p) => p.extCpuPercent !== undefined)
   if (pts.length === 0) return []
+  const t0 = pts[0]!.timestamp
   return pts.map((p) => {
+    let v = 0
     switch (metric) {
-      case 'cpu': return Math.round((p.extCpuPercent ?? 0) * 100) / 100
-      case 'diskRead': return Math.round((p.extDiskReadKBps ?? 0) * 100) / 100
-      case 'diskWrite': return Math.round((p.extDiskWriteKBps ?? 0) * 100) / 100
+      case 'cpu': v = Math.round((p.extCpuPercent ?? 0) * 100) / 100; break
+      case 'diskRead': v = Math.round((p.extDiskReadKBps ?? 0) * 100) / 100; break
+      case 'diskWrite': v = Math.round((p.extDiskWriteKBps ?? 0) * 100) / 100; break
       case 'gpu':
-        return p.extGpuEnginePercent != null ? Math.round(p.extGpuEnginePercent * 10) / 10 : 0
+        v = p.extGpuEnginePercent != null ? Math.round(p.extGpuEnginePercent * 10) / 10 : 0
+        break
       case 'vram':
-        return p.extGpuDedicatedMB != null ? Math.round(p.extGpuDedicatedMB * 10) / 10 : 0
-      default: return 0
+        v = p.extGpuDedicatedMB != null ? Math.round(p.extGpuDedicatedMB * 10) / 10 : 0
+        break
+      default: v = 0
     }
+    return { t: elapsedSecFromTs(t0, p.timestamp), v }
   })
 }
 
 export function buildBatchResourcePoints(runs: BatchRunLoaded[], metric: BatchResourceMetric) {
-  return buildPctPoints(runs, (r) => resourceSeriesFromReport(r.report, metric))
+  const series: BatchSeriesMeta[] = runs.map((r, i) => ({
+    key: runSeriesKey(r.sessionId),
+    label: chartLegendLabel(r.label),
+    color: RUN_COLORS[i % RUN_COLORS.length]!,
+  }))
+
+  const maxSec = Math.max(
+    1,
+    ...runs.map((r) => {
+      const s = resourceTimeSeries(r, metric)
+      return s.length > 0 ? s[s.length - 1]!.t : r.report.durationMs / 1000
+    }),
+  )
+  const grid = buildTimeGrid(maxSec)
+  const runSeries = runs.map((r) => resourceTimeSeries(r, metric))
+
+  const points: BatchMultiRunPoint[] = grid.map((elapsedSec) => {
+    const row: BatchMultiRunPoint = { elapsedSec }
+    runs.forEach((r, ri) => {
+      row[runSeriesKey(r.sessionId)] = interpolateAt(runSeries[ri]!, elapsedSec)
+    })
+    return row
+  })
+
+  return { points, series, maxElapsedSec: maxSec }
 }
 
 export function hasBatchResourceData(runs: BatchRunLoaded[]): boolean {
@@ -191,22 +278,29 @@ export function collectBatchProcessOptions(runs: BatchRunLoaded[]): ProcessIdent
     })
 }
 
-export function collectBatchMarkRefs(runs: BatchRunLoaded[]): BatchMarkAtPct[] {
-  const out: BatchMarkAtPct[] = []
+function marksForRun(run: BatchRunLoaded): ReportEventMark[] {
+  if (run.marks.length > 0) return run.marks
+  return collectReportEventMarksFromSnapshots(run.snapshots)
+}
+
+/** mark 的 timestamp 与会话快照同源 → 相对会话开始的秒数（与单次报告竖线一致） */
+function markElapsedSec(run: BatchRunLoaded, mark: { timestamp: number }): number {
+  const t0 = sessionStartTs(run)
+  return elapsedSecFromTs(t0, mark.timestamp)
+}
+
+export function collectBatchMarkRefs(runs: BatchRunLoaded[]): BatchMarkRef[] {
+  const out: BatchMarkRef[] = []
   for (const r of runs) {
-    if (r.snapshots.length < 2) continue
-    const t0 = r.snapshots[0]!.timestamp
-    const t1 = r.snapshots[r.snapshots.length - 1]!.timestamp
-    const dur = t1 - t0 || 1
-    for (const m of r.marks) {
-      const pct = Math.max(0, Math.min(100, Math.round(((m.timestamp - t0) / dur) * 1000) / 10))
+    if (r.snapshots.length < 1 && r.marks.length === 0) continue
+    for (const m of marksForRun(r)) {
       out.push({
-        pct,
+        elapsedSec: markElapsedSec(r, m),
         label: m.label,
         sessionId: r.sessionId,
         sessionLabel: r.label,
       })
     }
   }
-  return out.sort((a, b) => a.pct - b.pct || a.sessionLabel.localeCompare(b.sessionLabel))
+  return out.sort((a, b) => a.elapsedSec - b.elapsedSec || a.sessionLabel.localeCompare(b.sessionLabel))
 }

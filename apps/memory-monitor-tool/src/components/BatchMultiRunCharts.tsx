@@ -11,12 +11,13 @@ import {
   ReferenceLine,
 } from 'recharts'
 import type { ComparePidSelection } from '../utils/comparePidMetrics'
-import type { BatchMarkAtPct, BatchRunLoaded, BatchResourceMetric } from '../utils/batchMultiRunCharts'
+import type { BatchMarkRef, BatchRunLoaded, BatchResourceMetric } from '../utils/batchMultiRunCharts'
 import {
   buildBatchAggregateMemoryPoints,
   buildBatchProcessMemoryPoints,
   buildBatchResourcePoints,
   collectBatchMarkRefs,
+  formatElapsedAxis,
   hasBatchResourceData,
 } from '../utils/batchMultiRunCharts'
 
@@ -33,12 +34,35 @@ const RESOURCE_TITLES: Record<BatchResourceMetric, { title: string; unit: string
   vram: { title: 'GPU 显存 MB', unit: 'MB' },
 }
 
+const MARK_LABEL_FONT = 10
+const MARK_LABEL_LINE = 11
+/** 标签相对竖线向右偏移，避免与虚线叠在一起 */
+const MARK_LABEL_X_OFFSET = 7
+/** 相对绘图区顶部的起始下移 */
+const MARK_LABEL_Y_OFFSET = 16
+
+function StackedMarkLabel({ label, lineX, plotTop }: { label: string; lineX: number; plotTop: number }) {
+  const chars = [...label]
+  const textX = lineX + MARK_LABEL_X_OFFSET
+  const startY = plotTop + MARK_LABEL_Y_OFFSET
+  return (
+    <text x={textX} y={startY} textAnchor="start" fill="#faad14" fontSize={MARK_LABEL_FONT}>
+      {chars.map((ch, i) => (
+        <tspan key={`${i}-${ch}`} x={textX} dy={i === 0 ? 0 : MARK_LABEL_LINE}>
+          {ch}
+        </tspan>
+      ))}
+    </text>
+  )
+}
+
 function MultiRunChart({
   title,
   caption,
   points,
   series,
   unit,
+  maxElapsedSec,
   marks,
   showMarks,
 }: {
@@ -47,7 +71,8 @@ function MultiRunChart({
   points: Array<Record<string, number | string | null>>
   series: Array<{ key: string; label: string; color: string }>
   unit: string
-  marks?: BatchMarkAtPct[]
+  maxElapsedSec: number
+  marks?: BatchMarkRef[]
   showMarks?: boolean
 }) {
   if (points.length < 2 || series.length === 0) return null
@@ -60,18 +85,21 @@ function MultiRunChart({
       {caption ? <p className="chart-caption">{caption}</p> : null}
       {showMarks && markLines.length > 0 ? (
         <p className="chart-caption batch-mark-chart-hint">
-          橙色竖线为阶段标记（与单次测试报告一致，按各会话进度 % 落在折线图内）。
+          橙色竖线为阶段标记，标签在竖线右侧逐字竖排（字保持正向）；横轴为会话开始后经过秒数。
         </p>
       ) : null}
       <ResponsiveContainer width="100%" height={300} debounce={200}>
-        <LineChart data={points} margin={{ top: 32, right: 28, left: 8, bottom: 8 }}>
+        <LineChart data={points} margin={{ top: 12, right: 28, left: 8, bottom: 8 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
           <XAxis
-            dataKey="pct"
-            stroke="rgba(255,255,255,0.45)"
+            type="number"
+            dataKey="elapsedSec"
+            scale="linear"
+            stroke="rgba(255, 255, 255, 0.45)"
             fontSize={11}
-            tickFormatter={(v) => `${v}%`}
-            domain={[0, 100]}
+            tickFormatter={formatElapsedAxis}
+            domain={[0, maxElapsedSec]}
+            allowDataOverflow
           />
           <YAxis stroke="rgba(255,255,255,0.45)" fontSize={11} />
           <Tooltip
@@ -82,13 +110,29 @@ function MultiRunChart({
               color: '#e0e0e0',
               fontSize: 12,
             }}
-            labelFormatter={(pct) => `进度 ${pct}%`}
+            labelFormatter={(sec) => `开始后 ${formatElapsedAxis(Number(sec))}`}
             formatter={(value: number, name: string) => [
               typeof value === 'number' ? `${value.toFixed(1)} ${unit}` : '—',
               name,
             ]}
           />
           <Legend wrapperStyle={{ fontSize: 11 }} />
+          {showMarks && markLines.map((m) => (
+            <ReferenceLine
+              key={`${m.sessionId}-${m.label}-${m.elapsedSec}`}
+              x={m.elapsedSec}
+              stroke="#faad14"
+              strokeDasharray="4 3"
+              strokeWidth={1.75}
+              isFront
+              ifOverflow="visible"
+              label={({ viewBox }) => {
+                if (!viewBox || typeof viewBox.x !== 'number') return null
+                const plotTop = typeof viewBox.y === 'number' ? viewBox.y : 0
+                return <StackedMarkLabel label={m.label} lineX={viewBox.x} plotTop={plotTop} />
+              }}
+            />
+          ))}
           {series.map((s) => (
             <Line
               key={s.key}
@@ -101,24 +145,6 @@ function MultiRunChart({
               isAnimationActive={false}
             />
           ))}
-          {showMarks && markLines.map((m, idx) => {
-            const labelPos = idx % 3 === 0 ? 'insideTopLeft' : idx % 3 === 1 ? 'insideTop' : 'insideTopRight'
-            return (
-              <ReferenceLine
-                key={`${m.sessionId}-${m.label}-${m.pct}-${idx}`}
-                x={m.pct}
-                stroke="#faad14"
-                strokeDasharray="4 3"
-                strokeWidth={1.5}
-                label={{
-                  value: m.label,
-                  position: labelPos,
-                  fill: '#faad14',
-                  fontSize: 10,
-                }}
-              />
-            )
-          })}
         </LineChart>
       </ResponsiveContainer>
     </div>
@@ -152,10 +178,11 @@ const BatchMultiRunCharts: React.FC<BatchMultiRunChartsProps> = ({ runs, process
     <div className="batch-charts-wrap">
       <MultiRunChart
         title={processSelection === 'aggregate' ? '📈 总内存趋势（多轮叠加）' : '📈 进程内存趋势（多轮叠加）'}
-        caption="横轴为各轮会话进度 0–100%（按时长归一化），便于不同长度轮次对齐比较。同色线 = 同一轮测试；橙色竖线为场景 mark。"
+        caption="横轴为会话开始后经过时间（秒），与各轮快照、mark 的 timestamp 同源；不同轮次可直接对比「第几秒发生了什么」。"
         points={memoryBundle.points}
         series={memoryBundle.series}
         unit="MB"
+        maxElapsedSec={memoryBundle.maxElapsedSec}
         marks={marks}
         showMarks
       />
@@ -164,7 +191,7 @@ const BatchMultiRunCharts: React.FC<BatchMultiRunChartsProps> = ({ runs, process
         <>
           <h3 className="batch-charts-section-title">🖥️ 资源性能（多轮叠加）</h3>
           <p className="chart-caption">
-            CPU/磁盘为子树汇总；GPU 引擎 % 与显存 MB 分开展示。数据来自各轮 report.dataPoints 的 ext* 字段。
+            CPU/磁盘为子树汇总；横轴同为会话内经过时间（秒）。
           </p>
           <div className="batch-resource-charts-grid">
             {resourceCharts.map((c) => (
@@ -174,6 +201,7 @@ const BatchMultiRunCharts: React.FC<BatchMultiRunChartsProps> = ({ runs, process
                 points={c.points}
                 series={c.series}
                 unit={c.meta.unit}
+                maxElapsedSec={c.maxElapsedSec}
               />
             ))}
           </div>
