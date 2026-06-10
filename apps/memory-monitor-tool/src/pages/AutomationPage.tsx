@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSession } from '../hooks/useSession'
 import { useToast } from '../context/ToastContext'
 
-const DEFAULT_SCENARIO = 'scripts/scenarios/launcher-nav.scenario.json'
+const DEFAULT_SCENARIO = 'scenarios/launcher-nav.scenario.json'
 
 type RunPhase = 'idle' | 'running' | 'done' | 'error'
 
@@ -59,6 +59,8 @@ const AutomationPage: React.FC = () => {
   const [logLines, setLogLines] = useState<string[]>([])
   const [status, setStatus] = useState<AutomationStatus | null>(null)
   const [batchProgress, setBatchProgress] = useState<BatchProgress | null>(null)
+  const [scenarioSource, setScenarioSource] = useState<'userData' | 'bundled' | 'absolute' | null>(null)
+  const [scenarioSyncing, setScenarioSyncing] = useState(false)
 
   const dirty = scenarioJson !== savedJson
 
@@ -66,11 +68,14 @@ const AutomationPage: React.FC = () => {
     setLogLines((prev) => [...prev.slice(-60), line])
   }, [])
 
-  const refreshStatus = useCallback(async () => {
+  const refreshStatus = useCallback(async (): Promise<AutomationStatus | null> => {
     try {
       const data = await window.monitorAPI.getAutomationStatus()
       setStatus(data)
-    } catch { /* ignore */ }
+      return data
+    } catch {
+      return null
+    }
   }, [])
 
   const loadScenario = useCallback(async (path: string, silent = false) => {
@@ -86,6 +91,7 @@ const AutomationPage: React.FC = () => {
       setScenarioPath(r.scenarioPath ?? target)
       setScenarioJson(r.content)
       setSavedJson(r.content)
+      setScenarioSource(r.source ?? null)
       if (!silent) showToast('场景已加载', 'success')
     } finally {
       setScenarioLoading(false)
@@ -97,13 +103,36 @@ const AutomationPage: React.FC = () => {
   }, [loadScenario])
 
   useEffect(() => {
-    void refreshStatus()
+    void refreshStatus().then((data) => {
+      if (data?.batchRunning) {
+        setRunPhase('running')
+        setBatchProgress((prev) => prev ?? {
+          phase: data.batchPhase ?? 'running',
+          message: data.batchMessage ?? '执行中…',
+          runIndex: data.batchRunIndex ?? 0,
+          totalRuns: data.batchTotalRuns ?? 0,
+        })
+      }
+    })
     const offProgress = window.monitorAPI.onAutomationProgress((p) => {
+      setRunPhase('running')
       setBatchProgress(p)
       appendLog(`[${p.runIndex}/${p.totalRuns}] ${p.phase}: ${p.message}`)
     })
     const offStatus = window.monitorAPI.onAutomationStatus((data) => {
       setStatus(data)
+      if (data.batchRunning) {
+        setRunPhase('running')
+        setBatchProgress((prev) => {
+          if (prev && prev.runIndex === data.batchRunIndex && prev.phase === data.batchPhase) return prev
+          return {
+            phase: data.batchPhase ?? prev?.phase ?? 'running',
+            message: data.batchMessage ?? prev?.message ?? '执行中…',
+            runIndex: data.batchRunIndex ?? prev?.runIndex ?? 0,
+            totalRuns: data.batchTotalRuns ?? prev?.totalRuns ?? 0,
+          }
+        })
+      }
     })
     return () => {
       offProgress()
@@ -183,6 +212,45 @@ const AutomationPage: React.FC = () => {
     return saveScenario()
   }
 
+  const syncScenarioFromBundled = async (all = false) => {
+    setScenarioSyncing(true)
+    try {
+      if (all) {
+        const r = await window.monitorAPI.syncAllScenariosFromBundled()
+        if (!r.ok && !r.copied?.length) {
+          showToast(r.errors?.join('；') ?? '覆盖失败', 'error')
+          return
+        }
+        await loadScenario(scenarioPath, true)
+        appendLog(`已覆盖 ${r.copied?.length ?? 0} 个内置场景到 AppData 缓存`)
+        if (r.errors?.length) {
+          r.errors.forEach((e) => appendLog(`⚠ ${e}`))
+        }
+        showToast(`已覆盖 ${r.copied?.length ?? 0} 个场景缓存`, 'success')
+        return
+      }
+
+      const target = scenarioPath.trim()
+      if (!target) {
+        showToast('请先填写场景路径', 'warning')
+        return
+      }
+      const r = await window.monitorAPI.syncScenarioFromBundled(target)
+      if (!r.ok || r.content == null) {
+        showToast(r.error ?? '覆盖失败', 'error')
+        return
+      }
+      setScenarioPath(r.scenarioPath ?? target)
+      setScenarioJson(r.content)
+      setSavedJson(r.content)
+      setScenarioSource('userData')
+      appendLog(`已从仓库覆盖 AppData 缓存: ${r.scenarioPath ?? target}`)
+      showToast('已从仓库覆盖当前场景缓存', 'success')
+    } finally {
+      setScenarioSyncing(false)
+    }
+  }
+
   const runAutomation = async (rounds: number) => {
     if (!appPath.trim()) {
       showToast('请先选择应用 exe', 'warning')
@@ -237,7 +305,7 @@ const AutomationPage: React.FC = () => {
     }
   }
 
-  const busy = runPhase === 'running'
+  const busy = runPhase === 'running' || Boolean(status?.batchRunning)
   const activeBatch = batchProgress ?? (status?.batchRunning ? {
     phase: status.batchPhase ?? 'running',
     message: status.batchMessage ?? '执行中…',
@@ -295,7 +363,7 @@ const AutomationPage: React.FC = () => {
               type="text"
               value={scenarioPath}
               onChange={(e) => setScenarioPath(e.target.value)}
-              placeholder="scripts/scenarios/xxx.scenario.json"
+              placeholder="scenarios/xxx.scenario.json"
               disabled={busy}
             />
             <button
@@ -309,7 +377,33 @@ const AutomationPage: React.FC = () => {
             <button type="button" className="btn btn-secondary" onClick={pickScenario} disabled={busy}>
               浏览…
             </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => syncScenarioFromBundled(false)}
+              disabled={busy || scenarioSyncing || scenarioLoading}
+              title="用仓库 scripts/scenarios 里的文件覆盖 AppData 缓存"
+            >
+              {scenarioSyncing ? '覆盖中…' : '从仓库覆盖'}
+            </button>
           </div>
+          <p className="mmt-automation-hint">
+            运行时优先读 <code>AppData</code> 缓存（首次启动会复制一份，之后<strong>不会</strong>自动跟仓库同步，避免覆盖你在工具里的编辑）。
+            {scenarioSource === 'userData'
+              ? ' 当前加载的是缓存副本。'
+              : scenarioSource === 'bundled'
+                ? ' 当前直接读仓库文件（尚无缓存）。'
+                : ''}
+            {' '}
+            <button
+              type="button"
+              className="mmt-automation-link-btn"
+              onClick={() => syncScenarioFromBundled(true)}
+              disabled={busy || scenarioSyncing || scenarioLoading}
+            >
+              覆盖全部内置场景
+            </button>
+          </p>
 
           <div className="mmt-automation-editor-toolbar">
             <span className="mmt-automation-editor-meta">

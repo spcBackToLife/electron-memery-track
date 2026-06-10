@@ -1,0 +1,32 @@
+directories:
+  output: release3
+  buildResources: build
+appId: com.electronbenchmark.memory-monitor-tool
+productName: Electron Memory Monitor Tool
+asar: true
+asarUnpack:
+  - '**/*.node'
+  - node_modules/playwright-core/**
+files:
+  - filter:
+      - dist/**/*
+      - dist-electron/**/*
+      - native/memory_native.node
+      - node_modules/playwright-core/**/*
+extraResources:
+  - from: scripts
+    to: monitor-tool/scripts
+    filter:
+      - '**/*'
+      - '!build-native.cjs'
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+electronVersion: 33.4.11

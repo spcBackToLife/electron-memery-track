@@ -97,6 +97,21 @@ const api = {
       scenarioPath?: string
     }>,
 
+  syncScenarioFromBundled: (scenarioPath: string) =>
+    ipcRenderer.invoke('automation:sync-scenario-from-bundled', scenarioPath) as Promise<{
+      ok: boolean
+      error?: string
+      scenarioPath?: string
+      content?: string
+    }>,
+
+  syncAllScenariosFromBundled: () =>
+    ipcRenderer.invoke('automation:sync-all-scenarios-from-bundled') as Promise<{
+      ok: boolean
+      copied?: string[]
+      errors?: string[]
+    }>,
+
   pickScenario: () =>
     ipcRenderer.invoke('dialog:pick-scenario') as Promise<
       { canceled: true } | { canceled: false; path: string }

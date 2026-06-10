@@ -96,11 +96,25 @@ export interface MonitorAPI {
     error?: string
     scenarioPath?: string
     content?: string
+    source?: 'userData' | 'bundled' | 'absolute'
+    userDataExists?: boolean
+    bundledExists?: boolean
   }>
   writeScenario: (payload: { scenarioPath: string; content: string }) => Promise<{
     ok: boolean
     error?: string
     scenarioPath?: string
+  }>
+  syncScenarioFromBundled: (scenarioPath: string) => Promise<{
+    ok: boolean
+    error?: string
+    scenarioPath?: string
+    content?: string
+  }>
+  syncAllScenariosFromBundled: () => Promise<{
+    ok: boolean
+    copied?: string[]
+    errors?: string[]
   }>
   pickScenario: () => Promise<{ canceled: true } | { canceled: false; path: string }>
   saveScenarioAs: (suggestedName?: string) => Promise<{ canceled: true } | { canceled: false; path: string }>

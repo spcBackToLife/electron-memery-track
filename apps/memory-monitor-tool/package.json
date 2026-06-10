@@ -20,6 +20,7 @@
         "scenario:batch": "node scripts/run-batch.mjs"
     },
     "dependencies": {
+        "playwright-core": "^1.60.0",
         "react": "^18.3.1",
         "react-dom": "^18.3.1",
         "recharts": "^2.12.0"
@@ -40,7 +41,7 @@
         "appId": "com.electronbenchmark.memory-monitor-tool",
         "productName": "Electron Memory Monitor Tool",
         "directories": {
-            "output": "release3"
+            "output": "release4"
         },
         "asar": true,
         "asarUnpack": [
@@ -50,6 +51,20 @@
             "dist/**/*",
             "dist-electron/**/*",
             "native/memory_native.node"
+        ],
+        "extraResources": [
+            {
+                "from": "scripts",
+                "to": "monitor-tool/scripts",
+                "filter": [
+                    "**/*",
+                    "!build-native.cjs"
+                ]
+            },
+            {
+                "from": "node_modules/playwright-core",
+                "to": "monitor-tool/node_modules/playwright-core"
+            }
         ],
         "win": {
             "target": [

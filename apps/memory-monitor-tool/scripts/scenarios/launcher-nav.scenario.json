@@ -7,10 +7,11 @@
   "requireMmtSession": true,
   "steps": [
     { "type": "mark", "label": "scenario-start" },
-
+    { "type": "wait", "ms": 5000, "note": "预热 3 分钟，等 GPU/资源稳定" },
     { "type": "click", "note": "登录游戏", "locator": { "kind": "text", "value": "登录游戏" }, "markAfterClick": false },
     { "type": "wait", "ms": 5000 },
     { "type": "mark", "label": "after-登录游戏" },
+    { "type": "wait", "ms": 5000, "note": "等游戏进程稳定" },
 
     { "type": "click", "note": "生涯", "locator": { "kind": "text", "value": "生涯" }, "markAfterClick": false },
     { "type": "wait", "ms": 5000 },

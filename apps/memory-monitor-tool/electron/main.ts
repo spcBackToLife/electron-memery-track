@@ -41,28 +41,24 @@ import {
   computeResourceSummaryFromDataPoints,
   type ResourceSummaryPayload,
 } from '../src/utils/reportResourceSummary'
+import {
+  describeScenarioResolve,
+  ensureBundledScenariosSeeded,
+  getBundledAppRoot,
+  getBundledScriptPath,
+  getWritableScenariosDir,
+  initMonitorPaths,
+  overwriteAllBundledScenariosToUser,
+  overwriteUserScenarioFromBundled,
+  resolveScenarioPath,
+  resolveWritableScenarioPath,
+  toScenarioDisplayPath,
+} from './app-paths'
 
 const __dirname_electron = path.dirname(__filename)
+initMonitorPaths(__dirname_electron)
 const RENDERER_DIST = path.join(__dirname_electron, '../dist')
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
-
-function getMonitorAppRoot(): string {
-  return path.join(__dirname_electron, '..')
-}
-
-function resolveScenarioPath(scenarioPath: string): string {
-  return path.isAbsolute(scenarioPath)
-    ? scenarioPath
-    : path.resolve(getMonitorAppRoot(), scenarioPath)
-}
-
-function toScenarioDisplayPath(absPath: string): string {
-  const rel = path.relative(getMonitorAppRoot(), absPath)
-  if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
-    return rel.split(path.sep).join('/')
-  }
-  return absPath
-}
 
 // ============ 类型定义 ============
 
@@ -620,6 +616,56 @@ async function waitForLaunchedRootPid(
   return null
 }
 
+function isPidAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false
+  return enumerateAllProcessesSync().some((p) => p.pid === pid)
+}
+
+/**
+ * 用 CDP 监听 PID 校准监控根（Electron 游戏常由启动器拉起，根 PID 会在几秒内变化）。
+ * 返回校准后的根 PID；CDP 不可达时返回当前 monitoredRootPid。
+ */
+function tryResyncMonitoredRootFromCdp(
+  cdpPort: number,
+  fallbackAppPath: string,
+  fallbackAppName: string,
+  opts?: { force?: boolean; onStatus?: (message: string) => void },
+): number | null {
+  const cdpPid = findPidListeningOnPort(cdpPort)
+  if (cdpPid == null) return null
+
+  const root = monitoredRootPid
+  const rootDead = root != null && !isPidAlive(root)
+  const cdpMismatch = root != null && root !== cdpPid
+  const need =
+    opts?.force === true ||
+    root == null ||
+    externalPidsCache.length === 0 ||
+    rootDead ||
+    cdpMismatch
+
+  if (!need) return root
+
+  const proc = enumerateAllProcessesSync().find((p) => p.pid === cdpPid)
+  const resolvedPath = proc?.exePath?.trim() || fallbackAppPath
+  const resolvedName = proc?.name?.trim() || fallbackAppName
+  const msg = rootDead
+    ? `监控根 PID ${root} 已退出，按 CDP :${cdpPort} 校准为 ${cdpPid}`
+    : cdpMismatch
+      ? `监控根 PID ${root} 与 CDP 监听 ${cdpPid} 不一致，已校准`
+      : `CDP :${cdpPort} 监听 PID=${cdpPid}，已同步为监控根`
+  console.log(`[MonitorTool] ${msg}`)
+  opts?.onStatus?.(msg)
+  if (targetAppInfo) {
+    targetAppInfo.appPath = resolvedPath
+    targetAppInfo.appName = path.basename(resolvedPath).replace(/\.(exe|app|bat|sh)$/i, '') || resolvedName
+  }
+  applyLaunchedRootPid(cdpPid, resolvedPath, resolvedName)
+  consecutiveTimeoutCount = 0
+  broadcastAutomationStatus()
+  return cdpPid
+}
+
 /** CDP 端口就绪后，用监听该端口的进程作为监控根 PID（比启动器 PID 更准） */
 async function waitAndSyncRootPidFromCdp(
   cdpPort: number,
@@ -628,27 +674,13 @@ async function waitAndSyncRootPidFromCdp(
   timeoutMs: number,
   onStatus?: (message: string) => void,
 ): Promise<number | null> {
-  const report = (msg: string) => {
-    console.log(`[MonitorTool] ${msg}`)
-    onStatus?.(msg)
-  }
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const cdpPid = findPidListeningOnPort(cdpPort)
-    if (cdpPid != null) {
-      const proc = enumerateAllProcessesSync().find((p) => p.pid === cdpPid)
-      const resolvedPath = proc?.exePath?.trim() || fallbackAppPath
-      const resolvedName = proc?.name?.trim() || fallbackAppName
-      report(`CDP :${cdpPort} 监听 PID=${cdpPid}，已同步为监控根`)
-      if (targetAppInfo) {
-        targetAppInfo.appPath = resolvedPath
-        targetAppInfo.appName = path.basename(resolvedPath).replace(/\.(exe|app|bat|sh)$/i, '') || resolvedName
-      }
-      applyLaunchedRootPid(cdpPid, resolvedPath, resolvedName)
-      consecutiveTimeoutCount = 0
-      broadcastAutomationStatus()
-      return cdpPid
-    }
+    const synced = tryResyncMonitoredRootFromCdp(cdpPort, fallbackAppPath, fallbackAppName, {
+      force: true,
+      onStatus,
+    })
+    if (synced != null) return synced
     await sleepMs(500)
   }
   return null
@@ -658,7 +690,9 @@ async function waitAndSyncRootPidFromCdp(
 async function ensureBatchMonitorActive(cdpPort: number, sessionLabel: string): Promise<void> {
   const appPath = targetAppInfo?.appPath ?? ''
   const appName = targetAppInfo?.appName ?? 'app'
-  if (monitoredRootPid == null || externalPidsCache.length === 0) {
+  if (findPidListeningOnPort(cdpPort) != null) {
+    tryResyncMonitoredRootFromCdp(cdpPort, appPath, appName, { force: true })
+  } else {
     await waitAndSyncRootPidFromCdp(cdpPort, appPath, appName, 15_000)
   }
   if (currentSession?.status !== 'running') {
@@ -1189,17 +1223,42 @@ function buildSnapshotExternalSync(): MemorySnapshot {
 
 /** 定时采集路径：子树 + 内存 + Times/IO 在 Native AsyncWorker 中执行，避免主线程长时间「未响应」。 */
 async function buildSnapshotExternalAsync(): Promise<MemorySnapshot> {
-  const root = monitoredRootPid
+  let root = monitoredRootPid
   if (root == null) throw new Error('COLLECT_ABORTED')
 
+  if (automationBatchRunning && batchActiveCdpPort != null) {
+    const appPath = targetAppInfo?.appPath ?? ''
+    const appName = targetAppInfo?.appName ?? 'app'
+    if (!isPidAlive(root)) {
+      tryResyncMonitoredRootFromCdp(batchActiveCdpPort, appPath, appName, { force: true })
+      root = monitoredRootPid
+      if (root == null) throw new Error('COLLECT_ABORTED')
+    }
+  }
+
   const timestamp = Date.now()
-  const gathered: ExternalGatheredSnapshotPayload | null = await gatherExternalMonitorSnapshotAsync(root)
+  let gathered: ExternalGatheredSnapshotPayload | null = await gatherExternalMonitorSnapshotAsync(root)
 
   if (monitoredRootPid == null) throw new Error('COLLECT_ABORTED')
+  root = monitoredRootPid
+
+  if (!gathered && automationBatchRunning && batchActiveCdpPort != null) {
+    const before = root
+    tryResyncMonitoredRootFromCdp(
+      batchActiveCdpPort,
+      targetAppInfo?.appPath ?? '',
+      targetAppInfo?.appName ?? 'app',
+      { force: true },
+    )
+    if (monitoredRootPid != null && monitoredRootPid !== before) {
+      root = monitoredRootPid
+      gathered = await gatherExternalMonitorSnapshotAsync(root)
+    }
+  }
 
   if (gathered && gathered.tree.length > 0) {
     applyExternalStateFromTreeRows(root, gathered.tree)
-  } else {
+  } else if (isPidAlive(root)) {
     syncExternalProcessTreeFromNative(root)
   }
   maybeRefreshExternalTree()
@@ -1330,6 +1389,22 @@ async function startSession(
   return session
 }
 
+/** 结束会话前等待在途采集 tick 收尾，避免与落盘竞态 */
+async function drainCollectBeforeEndSession(maxMs = 5000): Promise<void> {
+  const deadline = Date.now() + maxMs
+  while (collectTickInFlight && Date.now() < deadline) {
+    await sleepMs(50)
+  }
+  if (collectTickInFlight) {
+    console.warn('[MonitorTool] endSession: 采集 tick 仍在进行，强制丢弃')
+    collectTickInFlight = false
+  }
+  const remain = Math.max(0, deadline - Date.now())
+  if (remain > 0) {
+    await Promise.race([collectTickChain, sleepMs(remain)])
+  }
+}
+
 /** 异步落盘：避免巨量 writeFileSync 长时间霸占主线程，其它 IPC（如拉取报告）可穿插执行 */
 async function endSession(): Promise<TestSession | null> {
   if (!currentSession || currentSession.status !== 'running') return null
@@ -1341,6 +1416,7 @@ async function endSession(): Promise<TestSession | null> {
   endSessionInProgress = true
   try {
     stopCollecting()
+    await drainCollectBeforeEndSession()
     clearExternalMonitorState()
     resetMonitorRuntimeState()
 
@@ -2467,13 +2543,13 @@ function registerIpcHandlers(): void {
     if (!source) return { ok: false, error: 'source 为空' }
     try {
       const { pathToFileURL } = await import('url')
-      const modPath = path.join(__dirname_electron, '../scripts/playwright-to-scenario.mjs')
+      const modPath = getBundledScriptPath('playwright-to-scenario.mjs')
       const mod = await import(pathToFileURL(modPath).href)
       const stepDelay = payload.stepDelayMs ?? 5000
       const scenario = mod.convertPlaywrightSource(source, 'converted', stepDelay)
       const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').slice(0, 15)
-      const rel = `scripts/scenarios/converted-${stamp}.scenario.json`
-      const abs = resolveScenarioPath(rel)
+      const rel = `scenarios/converted-${stamp}.scenario.json`
+      const abs = resolveWritableScenarioPath(rel)
       const content = JSON.stringify(scenario, null, 2)
       await fs.promises.mkdir(path.dirname(abs), { recursive: true })
       await fs.promises.writeFile(abs, content, 'utf-8')
@@ -2487,14 +2563,34 @@ function registerIpcHandlers(): void {
     const rel = String(scenarioPath ?? '').trim()
     if (!rel) return { ok: false, error: '场景路径为空' }
     try {
-      const abs = resolveScenarioPath(rel)
-      if (!fs.existsSync(abs)) return { ok: false, error: `场景不存在: ${rel}` }
-      const content = await fs.promises.readFile(abs, 'utf-8')
+      const info = describeScenarioResolve(rel)
+      if (!fs.existsSync(info.resolvedPath)) {
+        return { ok: false, error: `场景不存在: ${rel}` }
+      }
+      const content = await fs.promises.readFile(info.resolvedPath, 'utf-8')
       JSON.parse(content)
-      return { ok: true, scenarioPath: toScenarioDisplayPath(abs), content }
+      return {
+        ok: true,
+        scenarioPath: toScenarioDisplayPath(info.resolvedPath),
+        content,
+        source: info.source,
+        userDataExists: info.userDataExists,
+        bundledExists: info.bundledExists,
+      }
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) }
     }
+  })
+
+  ipcMain.handle('automation:sync-scenario-from-bundled', async (_e, scenarioPath: string) => {
+    const rel = String(scenarioPath ?? '').trim()
+    if (!rel) return { ok: false, error: '场景路径为空' }
+    return overwriteUserScenarioFromBundled(rel)
+  })
+
+  ipcMain.handle('automation:sync-all-scenarios-from-bundled', async () => {
+    const { copied, errors } = overwriteAllBundledScenariosToUser()
+    return { ok: errors.length === 0, copied, errors }
   })
 
   ipcMain.handle('automation:write-scenario', async (_e, payload: { scenarioPath: string; content: string }) => {
@@ -2504,7 +2600,7 @@ function registerIpcHandlers(): void {
     if (!content.trim()) return { ok: false, error: '内容为空' }
     try {
       JSON.parse(content)
-      const abs = resolveScenarioPath(rel)
+      const abs = resolveWritableScenarioPath(rel)
       await fs.promises.mkdir(path.dirname(abs), { recursive: true })
       await fs.promises.writeFile(abs, content, 'utf-8')
       return { ok: true, scenarioPath: toScenarioDisplayPath(abs) }
@@ -2516,10 +2612,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle('dialog:pick-scenario', async () => {
     const win = BrowserWindow.getFocusedWindow() ?? mainWindow
     if (!win) return { canceled: true as const }
-    const scenariosDir = path.join(getMonitorAppRoot(), 'scripts', 'scenarios')
+    const scenariosDir = getWritableScenariosDir()
     const r = await dialog.showOpenDialog(win, {
       title: '选择场景 JSON',
-      defaultPath: fs.existsSync(scenariosDir) ? scenariosDir : getMonitorAppRoot(),
+      defaultPath: fs.existsSync(scenariosDir) ? scenariosDir : getBundledAppRoot(),
       filters: [
         { name: '场景 JSON', extensions: ['json'] },
         { name: '所有文件', extensions: ['*'] },
@@ -2534,7 +2630,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('dialog:save-scenario', async (_e, suggestedName?: string) => {
     const win = BrowserWindow.getFocusedWindow() ?? mainWindow
     if (!win) return { canceled: true as const }
-    const scenariosDir = path.join(getMonitorAppRoot(), 'scripts', 'scenarios')
+    const scenariosDir = getWritableScenariosDir()
     const r = await dialog.showSaveDialog(win, {
       title: '另存场景 JSON',
       defaultPath: path.join(
@@ -2733,6 +2829,7 @@ function createMainWindow(): void {
 
 app.whenReady().then(() => {
   ensureStorageDir()
+  ensureBundledScenariosSeeded()
   registerIpcHandlers()
   createMainWindow()
 

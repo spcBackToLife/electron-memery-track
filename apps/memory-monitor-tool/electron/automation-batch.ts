@@ -5,6 +5,13 @@
 import { spawn } from 'child_process'
 import * as path from 'path'
 import * as fs from 'fs'
+import {
+  buildScenarioRunnerEnv,
+  getBundledAppRoot,
+  getBundledScriptPath,
+  resolveScenarioPath,
+} from './app-paths'
+import { getAutomationServerPort } from './automation-server'
 
 export interface AutomationBatchOptions {
   appPath: string
@@ -59,28 +66,41 @@ async function probeCdp(port: number, timeoutMs: number): Promise<boolean> {
   return false
 }
 
-function buildScenarioRunnerEnv(cdpPort: number): NodeJS.ProcessEnv {
-  const env = { ...process.env }
-  for (const key of Object.keys(env)) {
-    if (key.startsWith('VITE_') || key.startsWith('ELECTRON_RENDERER_') || key === 'ELECTRON_RUN_AS_NODE') {
-      delete env[key]
-    }
-  }
-  env.CDP_URL = `http://127.0.0.1:${cdpPort}`
-  env.MMT_SESSION_WAIT_MS = '30000'
-  return env
-}
-
-function runScenarioScript(scenarioPath: string, appRoot: string, cdpPort: number): Promise<void> {
+function runScenarioScript(
+  scenarioAbsPath: string,
+  cdpPort: number,
+  onLog?: (line: string) => void,
+): Promise<void> {
   const timeoutMs = Math.max(60_000, Number(process.env.SCENARIO_RUN_TIMEOUT_MS ?? 1_800_000))
+  const appRoot = getBundledAppRoot()
+  const runner = getBundledScriptPath('scenario-runner.mjs')
+  const mmtPort = getAutomationServerPort() ?? 39271
+
+  if (!fs.existsSync(runner)) {
+    return Promise.reject(new Error(`scenario-runner 不存在: ${runner}`))
+  }
+
   return new Promise((resolve, reject) => {
-    const runner = path.join(appRoot, 'scripts', 'scenario-runner.mjs')
-    const child = spawn(process.execPath, [runner, scenarioPath], {
+    const output: string[] = []
+    const appendOutput = (chunk: Buffer | string) => {
+      const text = String(chunk)
+      output.push(text)
+      process.stderr.write(text)
+      for (const line of text.split(/\r?\n/).filter(Boolean)) {
+        onLog?.(line)
+      }
+    }
+
+    const child = spawn(process.execPath, [runner, scenarioAbsPath], {
       cwd: appRoot,
-      env: buildScenarioRunnerEnv(cdpPort),
-      stdio: 'inherit',
+      env: buildScenarioRunnerEnv(cdpPort, mmtPort),
+      stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
+      windowsHide: true,
     })
+    child.stdout?.on('data', appendOutput)
+    child.stderr?.on('data', appendOutput)
+
     const timer = setTimeout(() => {
       try {
         child.kill()
@@ -94,7 +114,11 @@ function runScenarioScript(scenarioPath: string, appRoot: string, cdpPort: numbe
     child.on('exit', (code) => {
       clearTimeout(timer)
       if (code === 0) resolve()
-      else reject(new Error(`scenario-runner exit ${code ?? '?'}`))
+      else {
+        const tail = output.join('').trim().split(/\r?\n/).slice(-8).join('\n')
+        const detail = tail ? `\n${tail}` : ''
+        reject(new Error(`scenario-runner exit ${code ?? '?'}${detail}`))
+      }
     })
   })
 }
@@ -126,10 +150,9 @@ export async function runAutomationBatch(
   const warmup = Math.max(0, opts.warmupBeforeScenarioMs ?? 15_000)
   const cooldown = Math.max(0, opts.cooldownAfterScenarioMs ?? 5_000)
   const between = Math.max(0, opts.betweenRunsMs ?? 8_000)
-  const appRoot = path.join(__dirname, '..')
   const scenarioPath = path.isAbsolute(opts.scenarioPath)
     ? opts.scenarioPath
-    : path.resolve(appRoot, opts.scenarioPath)
+    : resolveScenarioPath(opts.scenarioPath)
 
   if (!fs.existsSync(opts.appPath)) {
     throw new Error(`应用不存在: ${opts.appPath}`)
@@ -179,22 +202,43 @@ export async function runAutomationBatch(
 
       if (warmup > 0) {
         deps.onProgress({ phase: 'warmup', runIndex: i, totalRuns: repeats, message: `预热 ${warmup}ms` })
-        await sleep(warmup)
+        // 分段预热并反复校准 CDP 根 PID，避免第 2 轮起监控根过期导致采集卡死
+        const warmupChunkMs = 3_000
+        let warmupLeft = warmup
+        while (warmupLeft > 0) {
+          const step = Math.min(warmupChunkMs, warmupLeft)
+          await sleep(step)
+          warmupLeft -= step
+          if (warmupLeft > 0) {
+            await deps.ensureMonitorActive?.(cdpPort, sessionLabel)
+            deps.onProgress({
+              phase: 'warmup',
+              runIndex: i,
+              totalRuns: repeats,
+              message: `预热中，剩余约 ${warmupLeft}ms…`,
+            })
+          }
+        }
         await deps.ensureMonitorActive?.(cdpPort, sessionLabel)
       }
 
       deps.onProgress({ phase: 'scenario', runIndex: i, totalRuns: repeats, message: '执行场景脚本…' })
       await deps.ensureMonitorActive?.(cdpPort, sessionLabel)
-      await runScenarioScript(scenarioPath, appRoot, cdpPort)
+      await runScenarioScript(scenarioPath, cdpPort, (line) => {
+        deps.onProgress({ phase: 'scenario', runIndex: i, totalRuns: repeats, message: line })
+      })
       deps.onProgress({ phase: 'scenario-done', runIndex: i, totalRuns: repeats, message: '场景脚本已结束，准备关闭会话…' })
 
       if (cooldown > 0) await sleep(cooldown)
 
-      deps.onProgress({ phase: 'kill', runIndex: i, totalRuns: repeats, message: '关闭目标应用…' })
-      await deps.killTarget().catch(() => { /* ignore */ })
-
+      // 须先结束会话并落盘，再杀进程：若先杀目标，采集仍会对已退出 PID 采样直至超时，
+      // 与 endSession 竞态，批量第 2 轮及以后易卡在「结束会话并落盘」。
       deps.onProgress({ phase: 'session-end', runIndex: i, totalRuns: repeats, message: '结束会话并落盘…' })
       await deps.endSession()
+      deps.resetRuntime()
+
+      deps.onProgress({ phase: 'kill', runIndex: i, totalRuns: repeats, message: '关闭目标应用…' })
+      await deps.killTarget().catch(() => { /* ignore */ })
       deps.resetRuntime()
 
       completed += 1
@@ -204,10 +248,11 @@ export async function runAutomationBatch(
       errors.push(`run ${i}: ${msg}`)
       deps.onProgress({ phase: 'run-error', runIndex: i, totalRuns: repeats, message: msg })
       try {
-        await deps.killTarget()
-      } catch { /* ignore */ }
-      try {
         await deps.endSession()
+      } catch { /* ignore */ }
+      deps.resetRuntime()
+      try {
+        await deps.killTarget()
       } catch { /* ignore */ }
       deps.resetRuntime()
     }

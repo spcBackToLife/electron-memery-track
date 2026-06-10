@@ -15,7 +15,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import playwright from 'playwright'
+import playwright from 'playwright-core'
 import { connectBrowser, pickMainPage } from './automation/cdp-page.mjs'
 import { resolveLocator } from './automation/locator.mjs'
 import { mmtHealth, mmtMark, waitForMmtSession } from './automation/mmt-client.mjs'

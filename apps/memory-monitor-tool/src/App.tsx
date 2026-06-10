@@ -56,7 +56,9 @@ const App: React.FC = () => {
         {currentPage === 'dashboard' && (
           <DashboardPage memoryData={memoryData} />
         )}
-        {currentPage === 'automation' && <AutomationPage />}
+        <div className={currentPage === 'automation' ? '' : 'mmt-page-hidden'}>
+          <AutomationPage />
+        </div>
         {currentPage === 'report' && <ReportPage />}
         {currentPage === 'batch-report' && <BatchReportPage />}
         {currentPage === 'compare' && <ComparePage />}
