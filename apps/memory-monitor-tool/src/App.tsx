@@ -1,7 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState } from 'react'
 import DashboardPage from './pages/DashboardPage'
 import ReportPage from './pages/ReportPage'
+import BatchReportPage from './pages/BatchReportPage'
 import ComparePage from './pages/ComparePage'
+import AutomationPage from './pages/AutomationPage'
 import { useMemoryData } from './hooks/useMemoryData'
 import type { PageType } from './types'
 
@@ -24,10 +26,22 @@ const App: React.FC = () => {
             📊 实时监控
           </button>
           <button
+            className={`mmt-nav-tab ${currentPage === 'automation' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('automation')}
+          >
+            🤖 自动化测试
+          </button>
+          <button
             className={`mmt-nav-tab ${currentPage === 'report' ? 'active' : ''}`}
             onClick={() => setCurrentPage('report')}
           >
             📋 测试报告
+          </button>
+          <button
+            className={`mmt-nav-tab ${currentPage === 'batch-report' ? 'active' : ''}`}
+            onClick={() => setCurrentPage('batch-report')}
+          >
+            📦 批量报告
           </button>
           <button
             className={`mmt-nav-tab ${currentPage === 'compare' ? 'active' : ''}`}
@@ -42,7 +56,9 @@ const App: React.FC = () => {
         {currentPage === 'dashboard' && (
           <DashboardPage memoryData={memoryData} />
         )}
+        {currentPage === 'automation' && <AutomationPage />}
         {currentPage === 'report' && <ReportPage />}
+        {currentPage === 'batch-report' && <BatchReportPage />}
         {currentPage === 'compare' && <ComparePage />}
       </main>
     </div>

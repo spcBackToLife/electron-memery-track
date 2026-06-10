@@ -1,0 +1,199 @@
+{
+  "name": "想法",
+  "description": "由 playwright-to-scenario 自动生成，每步 wait 5000ms + mark",
+  "cdpUrl": "http://127.0.0.1:9222",
+  "mmtApiUrl": "http://127.0.0.1:39271",
+  "requireMmtSession": true,
+  "steps": [
+    {
+      "type": "mark",
+      "label": "scenario-start"
+    },
+    {
+      "type": "click",
+      "note": "登录游戏",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "text",
+        "value": "登录游戏",
+        "exact": false
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-登录游戏"
+    },
+    {
+      "type": "click",
+      "note": "生涯",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "text",
+        "value": "生涯",
+        "exact": false
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-生涯"
+    },
+    {
+      "type": "click",
+      "note": "战绩",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "text",
+        "value": "战绩",
+        "exact": false
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-战绩"
+    },
+    {
+      "type": "click",
+      "note": "div",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "css",
+        "value": "div",
+        "filter": {
+          "hasText": "^首页$",
+          "regex": true
+        },
+        "nth": 1
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-div"
+    },
+    {
+      "type": "click",
+      "note": "MailBox_Button",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "css",
+        "value": "#MailBox_Button"
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-MailBox_Button"
+    },
+    {
+      "type": "click",
+      "note": "button-close",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "role",
+        "role": "button",
+        "name": "close"
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-button-close"
+    },
+    {
+      "type": "click",
+      "note": "Setting_Button",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "css",
+        "value": "#Setting_Button"
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-Setting_Button"
+    },
+    {
+      "type": "click",
+      "note": "设置",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "text",
+        "value": "设置",
+        "exact": false
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-设置"
+    },
+    {
+      "type": "click",
+      "note": "通用更新修复安装存储问题反馈关于游戏版本",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "text",
+        "value": "通用更新修复安装存储问题反馈关于游戏版本",
+        "exact": false
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-通用更新修复安装存储问题反馈关于游戏版本"
+    },
+    {
+      "type": "click",
+      "note": "button-close",
+      "markAfterClick": false,
+      "locator": {
+        "kind": "role",
+        "role": "button",
+        "name": "close"
+      }
+    },
+    {
+      "type": "wait",
+      "ms": 5000
+    },
+    {
+      "type": "mark",
+      "label": "after-button-close"
+    },
+    {
+      "type": "mark",
+      "label": "scenario-end"
+    }
+  ]
+}

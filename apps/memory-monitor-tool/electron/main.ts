@@ -9,7 +9,7 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import * as os from 'os'
-import { execFile, spawn } from 'child_process'
+import { execFile, execSync, spawn, type ChildProcess } from 'child_process'
 import {
   createPrivateWsProvider,
   getNativeModuleStatus,
@@ -33,9 +33,10 @@ import {
   getAutomationServerPort,
   startAutomationServer,
   stopAutomationServer,
+  type AutomationStatus,
   type LaunchMonitorBody,
 } from './automation-server'
-import { runAutomationBatch, type AutomationBatchOptions } from './automation-batch'
+import { runAutomationBatch, type AutomationBatchOptions, type AutomationBatchProgress } from './automation-batch'
 import {
   computeResourceSummaryFromDataPoints,
   type ResourceSummaryPayload,
@@ -44,6 +45,24 @@ import {
 const __dirname_electron = path.dirname(__filename)
 const RENDERER_DIST = path.join(__dirname_electron, '../dist')
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL
+
+function getMonitorAppRoot(): string {
+  return path.join(__dirname_electron, '..')
+}
+
+function resolveScenarioPath(scenarioPath: string): string {
+  return path.isAbsolute(scenarioPath)
+    ? scenarioPath
+    : path.resolve(getMonitorAppRoot(), scenarioPath)
+}
+
+function toScenarioDisplayPath(absPath: string): string {
+  const rel = path.relative(getMonitorAppRoot(), absPath)
+  if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+    return rel.split(path.sep).join('/')
+  }
+  return absPath
+}
 
 // ============ 类型定义 ============
 
@@ -159,11 +178,41 @@ let collectEpoch = 0
 const pendingCollectTimeouts = new Set<ReturnType<typeof setTimeout>>()
 /** 连续超时次数：达到 MAX_CONSECUTIVE_TIMEOUTS 自动结束会话 */
 let consecutiveTimeoutCount = 0
+/** 防止采集 tick 重叠（上一轮 native 未完成时又排入新 tick，主线程会卡死） */
+let collectTickInFlight = false
 const MAX_CONSECUTIVE_TIMEOUTS = 2
 /** 防止 endSession 落盘期间 currentSession 仍为 running，导致超时 tick 重复进入 endSession */
 let endSessionInProgress = false
 /** 批量自动化是否进行中 */
 let automationBatchRunning = false
+let lastAutomationBatchProgress: AutomationBatchProgress | null = null
+let batchActiveSessionLabel: string | null = null
+let batchActiveCdpPort: number | null = null
+
+function getAutomationStatusSnapshot(): AutomationStatus {
+  const sessionRunning = currentSession?.status === 'running'
+  const collecting = collectTimer != null
+  const externalRootPid = monitoredRootPid ?? (externalPidsCache.length > 0 ? externalPidsCache[0] : null)
+  const externalMonitor = externalRootPid != null
+  return {
+    sessionRunning,
+    sessionId: currentSession?.id ?? null,
+    sessionLabel: currentSession?.label ?? (automationBatchRunning ? batchActiveSessionLabel : null),
+    collecting,
+    externalMonitor,
+    externalRootPid,
+    monitorReady: sessionRunning && collecting && externalMonitor,
+    batchRunning: automationBatchRunning,
+    batchPhase: lastAutomationBatchProgress?.phase ?? null,
+    batchMessage: lastAutomationBatchProgress?.message ?? null,
+    batchRunIndex: lastAutomationBatchProgress?.runIndex ?? 0,
+    batchTotalRuns: lastAutomationBatchProgress?.totalRuns ?? 0,
+  }
+}
+
+function broadcastAutomationStatus(): void {
+  broadcastToRenderer('automation:status', getAutomationStatusSnapshot())
+}
 
 /** 存储目录 */
 let storageDir: string
@@ -178,11 +227,15 @@ let targetAppInfo: {
   startTime: Date
 } | null = null
 
-/** 外部应用子进程 */
-let targetAppProcess: ReturnType<typeof execFile> | null = null
+/** 外部应用启动时持有的子进程句柄（shell 下多为已退出的 cmd，杀应用靠 monitoredRootPid + taskkill） */
+let targetAppProcess: ChildProcess | null = null
 
 /** Windows：被监控外部应用的根 PID（exec 子进程）；非空时快照改为采集该进程树 */
 let monitoredRootPid: number | null = null
+/** endSession/reset 会清 monitoredRootPid，杀进程时仍用此字段 taskkill 真实游戏根 PID */
+let lastMonitoredRootPidForKill: number | null = null
+/** 批量/调试端口：结束轮次后按端口再杀一次监听进程，避免第二轮 CDP 仍挂在旧 PID */
+let lastCdpPortForKill: number | null = null
 let externalPidsCache: number[] = []
 let externalNamesCache: Map<number, string> = new Map()
 let externalExePathCache: Map<number, string> = new Map()
@@ -267,26 +320,393 @@ function resetMonitorRuntimeState(): void {
   collectTickChain = Promise.resolve()
 }
 
+function taskkillTreeAsync(pid: number): Promise<void> {
+  if (process.platform !== 'win32' || pid <= 0) return Promise.resolve()
+  return new Promise((resolve) => {
+    const child = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    })
+    child.on('close', () => resolve())
+    child.on('error', () => resolve())
+  })
+}
+
 /** 结束目标应用进程树（launch 子进程或已附加的根 PID） */
 async function killMonitoredTargetApp(): Promise<void> {
-  const rootPid = monitoredRootPid
+  const rootPid = monitoredRootPid ?? lastMonitoredRootPidForKill
+  const pidsToKill = new Set<number>()
+  if (rootPid != null && rootPid > 0) pidsToKill.add(rootPid)
   if (targetAppProcess && !targetAppProcess.killed) {
     const pid = targetAppProcess.pid
+    if (typeof pid === 'number' && pid > 0) pidsToKill.add(pid)
+    targetAppProcess = null
+  }
+  if (process.platform === 'win32' && lastCdpPortForKill != null) {
+    const portPid = findPidListeningOnPort(lastCdpPortForKill)
+    if (portPid != null) {
+      console.log(`[MonitorTool] 按 CDP :${lastCdpPortForKill} 结束监听进程 PID=${portPid}`)
+      pidsToKill.add(portPid)
+    }
+  }
+
+  for (const pid of pidsToKill) {
     try {
-      if (process.platform === 'win32' && pid) {
-        spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
-      } else {
+      if (process.platform === 'win32') {
+        await taskkillTreeAsync(pid)
+      } else if (targetAppProcess && !targetAppProcess.killed) {
         targetAppProcess.kill()
       }
     } catch { /* ignore */ }
-    targetAppProcess = null
-  } else if (process.platform === 'win32' && rootPid != null && rootPid > 0) {
-    try {
-      spawn('taskkill', ['/PID', String(rootPid), '/T', '/F'], { stdio: 'ignore', windowsHide: true })
-    } catch { /* ignore */ }
   }
-  await new Promise((r) => setTimeout(r, 1500))
+
+  if (pidsToKill.size > 0) {
+    console.log(`[MonitorTool] 已请求结束目标进程: ${[...pidsToKill].join(', ')}`)
+  }
+  await sleepMs(2000)
+  if (process.platform === 'win32' && lastCdpPortForKill != null) {
+    const freed = await waitForCdpPortFree(lastCdpPortForKill, 12_000)
+    if (!freed) {
+      console.warn(`[MonitorTool] CDP :${lastCdpPortForKill} 在 12s 内仍被占用，下一轮可能挂起或连到旧进程`)
+    } else {
+      console.log(`[MonitorTool] CDP :${lastCdpPortForKill} 已释放`)
+    }
+  }
+  lastMonitoredRootPidForKill = null
   clearExternalMonitorState()
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms))
+}
+
+function pathsEqualExe(a: string, b: string): boolean {
+  if (!a.trim() || !b.trim()) return false
+  try {
+    return path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase()
+  } catch {
+    return a.toLowerCase() === b.toLowerCase()
+  }
+}
+
+function snapshotAllProcessPids(): Set<number> {
+  return new Set(enumerateAllProcessesSync().map((p) => p.pid))
+}
+
+function findProcessesByExe(appPath: string): SystemProcessListItem[] {
+  return enumerateAllProcessesSync().filter((p) => p.exePath && pathsEqualExe(p.exePath, appPath))
+}
+
+function parseCdpPortFromArgs(args: string[]): number {
+  for (const a of args) {
+    const m = /^--remote-debugging-port=(\d+)$/i.exec(a.trim())
+    if (m) return Math.max(1, parseInt(m[1], 10) || 9222)
+  }
+  return 9222
+}
+
+/** Windows：查谁在本机监听 CDP 端口（Electron 主进程通常就是内存监控根 PID） */
+/** 轮询直到端口无 LISTENING 进程（批量下一轮启动前必须释放 9222） */
+async function waitForCdpPortFree(port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (findPidListeningOnPort(port) == null) return true
+    await sleepMs(400)
+  }
+  return findPidListeningOnPort(port) == null
+}
+
+function findPidListeningOnPort(port: number, pidsBefore?: Set<number>): number | null {
+  if (process.platform !== 'win32' || port <= 0) return null
+  try {
+    const out = execSync(`netstat -ano | findstr :${port}`, {
+      encoding: 'utf-8',
+      windowsHide: true,
+    })
+    const listeners: number[] = []
+    for (const line of out.split(/\r?\n/)) {
+      if (!/LISTENING/i.test(line)) continue
+      const parts = line.trim().split(/\s+/)
+      const pid = parseInt(parts[parts.length - 1] ?? '', 10)
+      if (!Number.isFinite(pid) || pid <= 0) continue
+      if (pidsBefore && pidsBefore.has(pid)) continue
+      listeners.push(pid)
+    }
+    if (listeners.length === 0) return null
+    return Math.max(...listeners)
+  } catch {
+    return null
+  }
+}
+
+function findNewProcessesInLaunchDir(appPath: string, pidsBefore: Set<number>): SystemProcessListItem[] {
+  let launchDir = ''
+  try {
+    launchDir = path.dirname(path.resolve(appPath)).toLowerCase()
+  } catch {
+    return []
+  }
+  return enumerateAllProcessesSync().filter((p) => {
+    if (pidsBefore.has(p.pid) || !p.exePath?.trim()) return false
+    try {
+      return path.dirname(path.resolve(p.exePath)).toLowerCase() === launchDir
+    } catch {
+      return false
+    }
+  })
+}
+
+function pickNewestProcess(candidates: SystemProcessListItem[]): number | null {
+  if (candidates.length === 0) return null
+  candidates.sort((a, b) => b.pid - a.pid)
+  return candidates[0].pid
+}
+
+interface WindowsLaunchResult {
+  method: string
+  hintedPid?: number
+}
+
+/**
+ * 启动被测应用时不能继承监控工具 dev 进程的环境变量。
+ * 否则会带上 VITE_DEV_SERVER_URL=http://localhost:3900 等，目标 Electron 误加载本工具页面而黑屏。
+ */
+function buildTargetAppEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env }
+  const stripped: string[] = []
+  for (const key of Object.keys(env)) {
+    if (
+      key.startsWith('VITE_')
+      || key.startsWith('ELECTRON_RENDERER_')
+      || key === 'ELECTRON_RUN_AS_NODE'
+      || key === 'NODE_ENV' && env[key] === 'development'
+    ) {
+      stripped.push(key)
+      delete env[key]
+    }
+  }
+  if (stripped.length > 0) {
+    console.log('[MonitorTool] 已剥离子进程环境变量:', stripped.join(', '))
+  }
+  return env
+}
+
+/**
+ * Electron 发行包常把 exe 放在版本子目录，resources 在更上层。
+ * 从 exe 向上找含 resources 的目录作为 cwd，避免目标应用黑屏（找不到 asar/静态资源）。
+ */
+function resolveLaunchCwd(appPath: string): string {
+  const exeDir = path.dirname(path.resolve(appPath))
+  let dir = exeDir
+  for (let i = 0; i < 10; i++) {
+    if (fs.existsSync(path.join(dir, 'resources'))) {
+      return dir
+    }
+    const parent = path.dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return exeDir
+}
+
+/**
+ * 启动被测应用：Windows 下用 detached spawn 直启 exe（等同 CreateProcess，不经 cmd/PowerShell 包一层）。
+ * PowerShell/cmd start 对部分平台启动器会导致子进程环境/工作目录不对，目标应用会黑屏。
+ */
+function launchTargetDetached(appPath: string, args: string[]): WindowsLaunchResult {
+  if (!fs.existsSync(appPath)) {
+    throw new Error(`应用不存在: ${appPath}`)
+  }
+
+  const cwd = resolveLaunchCwd(appPath)
+  const exeDir = path.dirname(path.resolve(appPath))
+  if (appPath.replace(/\\/g, '/').toLowerCase().includes('/node_modules/')) {
+    console.warn(
+      '[MonitorTool] 警告: 应用路径在 node_modules 内，可能不是正式安装入口。'
+      + ' 请选平台安装目录下的启动器（如 platform-launcher.exe 或开始菜单快捷方式指向的 exe）',
+    )
+  }
+  const absExe = path.resolve(appPath)
+  if (cwd !== exeDir) {
+    console.log(`[MonitorTool] 启动 cwd=${cwd}（exe 目录 ${exeDir}）`)
+  }
+  console.log('[MonitorTool] 即将执行 exe:', absExe)
+  console.log('[MonitorTool] 启动参数:', args.join(' ') || '(无)')
+
+  const child = spawn(absExe, args, {
+    cwd,
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: false,
+    env: buildTargetAppEnv(),
+  })
+  child.unref()
+  targetAppProcess = child
+  child.on('exit', () => {
+    if (targetAppProcess === child) targetAppProcess = null
+  })
+  const hintedPid = typeof child.pid === 'number' && child.pid > 0 ? child.pid : undefined
+  return { method: 'detached-spawn', hintedPid }
+}
+
+async function waitForLaunchedRootPid(
+  appPath: string,
+  pidsBefore: Set<number>,
+  timeoutMs: number,
+  cdpPort: number,
+  onStatus?: (message: string) => void,
+  hintedPid?: number,
+): Promise<{ pid: number; via: string } | null> {
+  const report = (message: string) => {
+    console.log(`[MonitorTool] ${message}`)
+    onStatus?.(message)
+  }
+  const deadline = Date.now() + timeoutMs
+  let lastLogAt = 0
+
+  const tryHintedPid = (): number | null => {
+    if (hintedPid == null || hintedPid <= 0) return null
+    const proc = enumerateAllProcessesSync().find((p) => p.pid === hintedPid)
+    if (proc) return hintedPid
+    return null
+  }
+
+  while (Date.now() < deadline) {
+    const hint = tryHintedPid()
+    if (hint != null && !pidsBefore.has(hint)) {
+      report(`已使用启动返回的 PID=${hint}`)
+      return { pid: hint, via: 'launch-hint' }
+    }
+
+    const freshExact = findProcessesByExe(appPath).filter((p) => !pidsBefore.has(p.pid))
+    const exactPid = pickNewestProcess(freshExact)
+    if (exactPid != null) {
+      report(`已匹配启动 exe PID=${exactPid}`)
+      return { pid: exactPid, via: 'exe-path' }
+    }
+
+    const freshInDir = findNewProcessesInLaunchDir(appPath, pidsBefore)
+    const dirPid = pickNewestProcess(freshInDir)
+    if (dirPid != null) {
+      report(`已匹配安装目录新进程 PID=${dirPid}（启动器可能拉起子进程）`)
+      return { pid: dirPid, via: 'launch-dir' }
+    }
+
+    const portPid = findPidListeningOnPort(cdpPort, pidsBefore)
+    if (portPid != null) {
+      report(`已匹配 CDP :${cdpPort} 监听进程 PID=${portPid}`)
+      return { pid: portPid, via: 'cdp-port' }
+    }
+
+    const now = Date.now()
+    if (now - lastLogAt >= 5000) {
+      const elapsed = Math.round((now - (deadline - timeoutMs)) / 1000)
+      report(`等待目标进程… ${elapsed}s（exe 路径 / 同目录 / CDP :${cdpPort}）`)
+      lastLogAt = now
+    }
+    await sleepMs(500)
+  }
+
+  const portPid = findPidListeningOnPort(cdpPort)
+  if (portPid != null) {
+    report(`超时后仍发现 CDP :${cdpPort} 监听 PID=${portPid}`)
+    return { pid: portPid, via: 'cdp-port-late' }
+  }
+  const anyExact = pickNewestProcess(findProcessesByExe(appPath))
+  if (anyExact != null) {
+    report(`超时后回退到已有 exe 实例 PID=${anyExact}`)
+    return { pid: anyExact, via: 'exe-fallback' }
+  }
+  return null
+}
+
+/** CDP 端口就绪后，用监听该端口的进程作为监控根 PID（比启动器 PID 更准） */
+async function waitAndSyncRootPidFromCdp(
+  cdpPort: number,
+  fallbackAppPath: string,
+  fallbackAppName: string,
+  timeoutMs: number,
+  onStatus?: (message: string) => void,
+): Promise<number | null> {
+  const report = (msg: string) => {
+    console.log(`[MonitorTool] ${msg}`)
+    onStatus?.(msg)
+  }
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const cdpPid = findPidListeningOnPort(cdpPort)
+    if (cdpPid != null) {
+      const proc = enumerateAllProcessesSync().find((p) => p.pid === cdpPid)
+      const resolvedPath = proc?.exePath?.trim() || fallbackAppPath
+      const resolvedName = proc?.name?.trim() || fallbackAppName
+      report(`CDP :${cdpPort} 监听 PID=${cdpPid}，已同步为监控根`)
+      if (targetAppInfo) {
+        targetAppInfo.appPath = resolvedPath
+        targetAppInfo.appName = path.basename(resolvedPath).replace(/\.(exe|app|bat|sh)$/i, '') || resolvedName
+      }
+      applyLaunchedRootPid(cdpPid, resolvedPath, resolvedName)
+      consecutiveTimeoutCount = 0
+      broadcastAutomationStatus()
+      return cdpPid
+    }
+    await sleepMs(500)
+  }
+  return null
+}
+
+/** 批量自动化期间确保会话、采集、外部 PID 均就绪（采集超时时也会调用） */
+async function ensureBatchMonitorActive(cdpPort: number, sessionLabel: string): Promise<void> {
+  const appPath = targetAppInfo?.appPath ?? ''
+  const appName = targetAppInfo?.appName ?? 'app'
+  if (monitoredRootPid == null || externalPidsCache.length === 0) {
+    await waitAndSyncRootPidFromCdp(cdpPort, appPath, appName, 15_000)
+  }
+  if (currentSession?.status !== 'running') {
+    await startSession(sessionLabel, `批量自动化: ${appPath}`)
+  } else if (collectTimer == null) {
+    startCollecting()
+  }
+  broadcastAutomationStatus()
+}
+
+function applyLaunchedRootPid(childPid: number, appPath: string, appName: string): void {
+  const proc = enumerateAllProcessesSync().find((p) => p.pid === childPid)
+  const resolvedExe = proc?.exePath?.trim() || appPath
+  const resolvedName = proc?.name?.trim() || appName
+  privateWsCache = new Map()
+  privateWsLastRefresh = 0
+  lastExternalPerfSample = null
+  externalTotalExcludedPids = new Set()
+  externalPidsCache = [childPid]
+  externalNamesCache = new Map([[childPid, resolvedName]])
+  externalExePathCache = new Map([[childPid, resolvedExe]])
+  externalCommandLineCache = new Map()
+  externalTreeLastRefresh = 0
+  lastMonitoredRootPidForKill = childPid
+  if (isNativeMemoryLoaded()) {
+    monitoredRootPid = childPid
+    syncExternalProcessTreeFromNative(childPid)
+    perfChainMain('launchTargetApp_tree_applied', {
+      rootPid: childPid,
+      pidCount: externalPidsCache.length,
+    })
+  } else {
+    monitoredRootPid = childPid
+    console.warn(
+      '[MonitorTool] memory_native.node 未加载，无法按 C++ 路径采集外部进程树内存。请在本应用目录执行 pnpm run build:with-native 编译 native 后再试。',
+    )
+  }
+  if (!isNativeMemoryLoaded()) {
+    void fetchWindowsProcessTree(childPid).then((result) => {
+      applyExternalTreeFetchResult(childPid, result.pids, result.names, result.exePath, result.commandLine)
+      perfChainMain('launchTargetApp_tree_applied', {
+        rootPid: childPid,
+        pidCount: result.pids.length,
+      })
+      broadcastAutomationStatus()
+    })
+  }
+  broadcastAutomationStatus()
 }
 
 /** 仅清理外部进程树状态，不启停采集定时器 */
@@ -482,6 +902,9 @@ function applyExternalTreeFetchResult(
   }
   externalPidsCache = list
   pruneExternalExcludedToTree(externalPidsCache)
+  if (monitoredRootPid == null && list.length > 0) {
+    monitoredRootPid = rootPid
+  }
 }
 
 // ============ 工具函数 ============
@@ -860,7 +1283,17 @@ function saveSessionsIndex(): void {
   fs.writeFileSync(indexPath, JSON.stringify(sessionsIndex, null, 2), 'utf-8')
 }
 
-async function startSession(label: string, description?: string): Promise<TestSession> {
+interface StartSessionOptions {
+  /** 默认 true；launch 流程中先开会话、再附加 PID，应传 false 避免与同步快照争抢 native */
+  autoCollect?: boolean
+}
+
+async function startSession(
+  label: string,
+  description?: string,
+  options?: StartSessionOptions,
+): Promise<TestSession> {
+  const autoCollect = options?.autoCollect !== false
   // 如果有正在运行的会话，先结束它（须 await，否则新会话可能在旧会话落盘前开始）
   if (currentSession && currentSession.status === 'running') {
     await endSession()
@@ -887,10 +1320,13 @@ async function startSession(label: string, description?: string): Promise<TestSe
 
   broadcastToRenderer('session:started', session)
 
-  startCollecting()
+  if (autoCollect) {
+    startCollecting()
+  }
 
-  perfChainMain('startSession', { sessionId: session.id, label })
+  perfChainMain('startSession', { sessionId: session.id, label, autoCollect })
   console.log(`[MonitorTool] Session started: ${label} (${session.id})`)
+  broadcastAutomationStatus()
   return session
 }
 
@@ -977,6 +1413,7 @@ async function endSession(): Promise<TestSession | null> {
     broadcastToRenderer('session:ended', { session: endedRef, report })
 
     console.log(`[MonitorTool] Session ended: ${endedRef.label}`)
+    broadcastAutomationStatus()
     return endedRef
   } finally {
     endSessionInProgress = false
@@ -1364,6 +1801,11 @@ function enqueueCollectTick(): void {
 async function runCollectTickBody(): Promise<void> {
   const epochAtStart = collectEpoch
   if (isCollectTickStale(epochAtStart)) return
+  if (collectTickInFlight) {
+    perfChainMain('collect_tick_skipped', { reason: 'previous tick still in flight', collectEpoch })
+    return
+  }
+  collectTickInFlight = true
 
   const now = Date.now()
   const driftMs = lastCollectScheduledAt ? now - lastCollectScheduledAt - CONFIG.collectInterval : 0
@@ -1427,6 +1869,14 @@ async function runCollectTickBody(): Promise<void> {
       console.error(`[MonitorTool] collect tick timeout (${consecutiveTimeoutCount}/${MAX_CONSECUTIVE_TIMEOUTS})`)
 
       if (consecutiveTimeoutCount >= MAX_CONSECUTIVE_TIMEOUTS) {
+        if (automationBatchRunning) {
+          console.warn('[MonitorTool] 批量自动化采集超时，重同步监控（不自动结束会话）')
+          const port = batchActiveCdpPort ?? 9222
+          const label = batchActiveSessionLabel ?? 'auto-batch'
+          await ensureBatchMonitorActive(port, label)
+          consecutiveTimeoutCount = 0
+          return
+        }
         console.warn('[MonitorTool] 连续超时 2 次，自动结束会话')
         await endSession()
       }
@@ -1436,6 +1886,7 @@ async function runCollectTickBody(): Promise<void> {
     consecutiveTimeoutCount = 0
     throw err
   } finally {
+    collectTickInFlight = false
     if (timeoutId != null) {
       clearTimeout(timeoutId)
       pendingCollectTimeouts.delete(timeoutId)
@@ -1447,6 +1898,7 @@ async function runCollectTickBody(): Promise<void> {
 function forceResetCollectChain(): void {
   tearDownCollectScheduler()
   consecutiveTimeoutCount = 0
+  collectTickInFlight = false
   console.warn('[MonitorTool] forceResetCollectChain: 已停止采集并丢弃在途 tick')
 }
 
@@ -1597,6 +2049,7 @@ async function attachToProcess(pid: number, processInfo: SystemProcessListItem, 
 
     // 设置根 PID 并立即枚举子树
     monitoredRootPid = pid
+    lastMonitoredRootPidForKill = pid
     privateWsCache = new Map()
     privateWsLastRefresh = 0
     lastExternalPerfSample = null
@@ -1619,6 +2072,7 @@ async function attachToProcess(pid: number, processInfo: SystemProcessListItem, 
     const session = await startSession(
       sessionLabel,
       `已运行进程: ${exePath || '未知路径'} (PID=${pid})`,
+      { autoCollect: false },
     )
     perfChainMain('attachToProcess_resolve', {
       sessionId: session.id,
@@ -1626,14 +2080,15 @@ async function attachToProcess(pid: number, processInfo: SystemProcessListItem, 
       collectIntervalMs: CONFIG.collectInterval,
     })
 
-    // 立即推一帧同步快照
-    try {
-      const immediateSnap = buildSnapshot()
-      pushSnapshot(immediateSnap)
-      console.log('[MonitorTool] attachToProcess: immediate snapshot pushed, seq=', immediateSnap.seq)
-    } catch (snapErr) {
-      console.error('[MonitorTool] attachToProcess: immediate sync snapshot failed:', snapErr)
-    }
+    startCollecting()
+    void buildSnapshotAsync()
+      .then((immediateSnap) => {
+        pushSnapshot(immediateSnap)
+        console.log('[MonitorTool] attachToProcess: immediate snapshot pushed, seq=', immediateSnap.seq)
+      })
+      .catch((snapErr) => {
+        console.error('[MonitorTool] attachToProcess: immediate async snapshot failed:', snapErr)
+      })
 
     return { success: true, info: { pid, appName, exePath }, session }
   } catch (err) {
@@ -1653,10 +2108,14 @@ interface LaunchAppResult {
   session?: TestSession
 }
 
-async function launchTargetApp(appPath: string, args: string[], customSessionLabel?: string): Promise<LaunchAppResult> {
+async function launchTargetApp(
+  appPath: string,
+  args: string[],
+  customSessionLabel?: string,
+  onLaunchStatus?: (message: string) => void,
+): Promise<LaunchAppResult> {
   perfChainMain('launchTargetApp_begin', { appPath })
   try {
-    // 重置采集链：防止旧进程退出后遗留的异步 gather 阻塞新快照
     collectTickChain = Promise.resolve()
 
     const appName = path.basename(appPath).replace(/\.(exe|app|bat|sh)$/, '')
@@ -1666,99 +2125,132 @@ async function launchTargetApp(appPath: string, args: string[], customSessionLab
       startTime: new Date(),
     }
 
-    return await new Promise<LaunchAppResult>((resolve) => {
-      // @types/node 中 execFile 的 options 重载较窄，运行时需要 stdio 以捕获 stderr
-      const execOpts = {
-        cwd: path.dirname(appPath),
-        env: { ...process.env },
-        stdio: ['ignore', 'pipe', 'pipe'] as const,
-      } as Parameters<typeof execFile>[2]
-      targetAppProcess = execFile(appPath, args, execOpts, (err) => {
-        console.log(
-          `[MonitorTool] Target app exited`,
-          err ? `code=${(err as NodeJS.ErrnoException).code ?? '?'}` : 'ok',
-        )
-        targetAppProcess = null
-        targetAppInfo = null
-        // 目标应用退出时自动结束正在运行的会话，避免采集器对着无效 PID 超时
-        if (currentSession?.status === 'running') {
-          void endSession()
-        }
-        clearExternalMonitorState()
-      })
+    let childPid: number | null = null
 
-      targetAppProcess.stderr?.on('data', (data: Buffer) => {
-        console.log(`[TargetApp][stderr]: ${data.toString().trim()}`)
-      })
-
-      const childPid = targetAppProcess.pid
-      if (typeof childPid !== 'number' || childPid <= 0) {
-        console.error('[MonitorTool] 无法获取目标进程 PID')
-        targetAppProcess = null
+    if (process.platform === 'win32') {
+      const pidsBefore = snapshotAllProcessPids()
+      const cdpPort = parseCdpPortFromArgs(args)
+      let launchResult: WindowsLaunchResult
+      try {
+        launchResult = launchTargetDetached(appPath, args)
+      } catch (e) {
         targetAppInfo = null
         clearExternalMonitorState()
-        resolve({ success: false, error: '无法获取目标进程 PID' })
-        return
+        return { success: false, error: e instanceof Error ? e.message : String(e) }
       }
-
-      privateWsCache = new Map()
-      privateWsLastRefresh = 0
-      lastExternalPerfSample = null
-      externalTotalExcludedPids = new Set()
-      externalPidsCache = [childPid]
-      externalNamesCache = new Map([[childPid, appName]])
-      externalExePathCache = new Map([[childPid, appPath]])
-      externalCommandLineCache = new Map()
-      externalTreeLastRefresh = 0
-      if (isNativeMemoryLoaded()) {
-        monitoredRootPid = childPid
-        syncExternalProcessTreeFromNative(childPid)
-        perfChainMain('launchTargetApp_tree_applied', {
-          rootPid: childPid,
-          pidCount: externalPidsCache.length,
-        })
-      } else {
-        monitoredRootPid = null
-        console.warn(
-          '[MonitorTool] memory_native.node 未加载，无法按 C++ 路径采集外部进程树内存。请在本应用目录执行 pnpm run build:with-native 编译 native 后再试。',
-        )
-      }
-      if (!isNativeMemoryLoaded()) {
-        void fetchWindowsProcessTree(childPid).then((result) => {
-          applyExternalTreeFetchResult(childPid, result.pids, result.names, result.exePath, result.commandLine)
-          perfChainMain('launchTargetApp_tree_applied', {
-            rootPid: childPid,
-            pidCount: result.pids.length,
-          })
-        })
-      }
-
-      // 为本次「启动并监控」自动新开测试会话（会 await 结束当前运行中的会话并落盘）
-      void startSession(customSessionLabel ?? `启动: ${appName}`, `可执行文件: ${appPath}`).then(
-        (session) => {
-          perfChainMain('launchTargetApp_resolve', {
-            sessionId: session.id,
-            childPid,
-            collectIntervalMs: CONFIG.collectInterval,
-          })
-
-          // 立即推一帧同步快照，确保前端不会因旧采集链 hang 住而一直转圈
-          try {
-            const immediateSnap = buildSnapshot()
-            pushSnapshot(immediateSnap)
-            console.log('[MonitorTool] launchTargetApp: immediate snapshot pushed, seq=', immediateSnap.seq)
-          } catch (snapErr) {
-            console.error('[MonitorTool] launchTargetApp: immediate sync snapshot failed:', snapErr)
-          }
-
-          resolve({ success: true, info: { appPath, appName }, session })
-        },
-        (e) => {
-          console.error('[MonitorTool] startSession after launch failed:', e)
-          resolve({ success: false, error: String(e) })
-        },
+      onLaunchStatus?.(`已用 ${launchResult.method} 启动，等待目标进程…`)
+      const resolved = await waitForLaunchedRootPid(
+        appPath,
+        pidsBefore,
+        90_000,
+        cdpPort,
+        onLaunchStatus,
+        launchResult.hintedPid,
       )
+      if (resolved == null) {
+        targetAppInfo = null
+        clearExternalMonitorState()
+        return {
+          success: false,
+          error:
+            '启动命令已执行，但 90s 内未找到目标进程。'
+            + ' 请确认游戏窗口是否弹出；若启动器会拉起子进程，可手动启动后用「附加到进程」。'
+            + ` 或执行 pnpm scenario:check-cdp 检查 CDP :${cdpPort}`,
+        }
+      }
+      childPid = resolved.pid
+      console.log(`[MonitorTool] Windows launch resolved root PID: ${childPid} (via ${resolved.via})`)
+      const proc = enumerateAllProcessesSync().find((p) => p.pid === childPid)
+      if (proc?.exePath?.trim() && targetAppInfo) {
+        targetAppInfo.appPath = proc.exePath.trim()
+        targetAppInfo.appName = path.basename(proc.exePath).replace(/\.(exe|app|bat|sh)$/i, '')
+      }
+    } else {
+      childPid = await new Promise<number | null>((resolve) => {
+        const execOpts = {
+          cwd: path.dirname(appPath),
+          env: buildTargetAppEnv(),
+          stdio: ['ignore', 'pipe', 'pipe'] as const,
+        } as Parameters<typeof execFile>[2]
+        targetAppProcess = execFile(path.resolve(appPath), args, execOpts, (err) => {
+          console.log(
+            `[MonitorTool] Target app exited`,
+            err ? `code=${(err as NodeJS.ErrnoException).code ?? '?'}` : 'ok',
+          )
+          targetAppProcess = null
+          targetAppInfo = null
+          if (currentSession?.status === 'running') {
+            void endSession()
+          }
+          clearExternalMonitorState()
+        })
+        targetAppProcess.stderr?.on('data', (data: Buffer) => {
+          console.log(`[TargetApp][stderr]: ${data.toString().trim()}`)
+        })
+        const pid = targetAppProcess.pid
+        resolve(typeof pid === 'number' && pid > 0 ? pid : null)
+      })
+      if (childPid == null) {
+        targetAppProcess = null
+        targetAppInfo = null
+        clearExternalMonitorState()
+        return { success: false, error: '无法获取目标进程 PID' }
+      }
+    }
+
+    applyLaunchedRootPid(childPid, appPath, appName)
+
+    const cdpPortForSession = parseCdpPortFromArgs(args)
+    const needsCdp = args.some((a) => /^--remote-debugging-port=/i.test(a.trim()))
+    if (needsCdp && process.platform === 'win32') {
+      onLaunchStatus?.(`等待 CDP :${cdpPortForSession} 就绪后再开会话…`)
+      const synced = await waitAndSyncRootPidFromCdp(
+        cdpPortForSession,
+        targetAppInfo?.appPath ?? appPath,
+        targetAppInfo?.appName ?? appName,
+        90_000,
+        onLaunchStatus,
+      )
+      if (synced == null) {
+        targetAppInfo = null
+        clearExternalMonitorState()
+        return {
+          success: false,
+          error: `CDP :${cdpPortForSession} 在 90s 内未就绪，无法附加监控。请确认调试端口已传到带窗口的进程`,
+        }
+      }
+      childPid = synced
+    }
+
+    const sessionLabel = customSessionLabel ?? `启动: ${appName}`
+    if (automationBatchRunning) {
+      batchActiveSessionLabel = sessionLabel
+      batchActiveCdpPort = needsCdp ? cdpPortForSession : null
+      if (needsCdp) lastCdpPortForKill = cdpPortForSession
+    }
+
+    const session = await startSession(
+      sessionLabel,
+      `可执行文件: ${targetAppInfo?.appPath ?? appPath}`,
+      { autoCollect: false },
+    )
+    perfChainMain('launchTargetApp_resolve', {
+      sessionId: session.id,
+      childPid,
+      collectIntervalMs: CONFIG.collectInterval,
     })
+
+    startCollecting()
+    void buildSnapshotAsync()
+      .then((immediateSnap) => {
+        pushSnapshot(immediateSnap)
+        console.log('[MonitorTool] launchTargetApp: immediate snapshot pushed, seq=', immediateSnap.seq)
+      })
+      .catch((snapErr) => {
+        console.error('[MonitorTool] launchTargetApp: immediate async snapshot failed:', snapErr)
+      })
+
+    return { success: true, info: { appPath, appName }, session }
   } catch (err) {
     console.error('[MonitorTool] Failed to launch target app:', err)
     targetAppInfo = null
@@ -1920,6 +2412,8 @@ function registerIpcHandlers(): void {
     port: getAutomationServerPort(),
   }))
 
+  ipcMain.handle('automation:get-status', (): AutomationStatus => getAutomationStatusSnapshot())
+
   ipcMain.handle('automation:run-batch', async (_e, opts: AutomationBatchOptions) => {
     if (automationBatchRunning) {
       return { ok: false, error: '批量自动化正在进行中' }
@@ -1928,20 +2422,28 @@ function registerIpcHandlers(): void {
       return { ok: false, error: '请提供 appPath' }
     }
     automationBatchRunning = true
+    batchActiveSessionLabel = null
+    batchActiveCdpPort = opts.cdpPort ?? 9222
+    lastCdpPortForKill = batchActiveCdpPort
+    lastAutomationBatchProgress = { phase: 'init', runIndex: 0, totalRuns: 0, message: '准备中…' }
+    broadcastAutomationStatus()
     try {
       const result = await runAutomationBatch(opts, {
-        launchApp: (appPath, args, sessionLabel) => launchTargetApp(appPath, args, sessionLabel),
+        launchApp: (appPath, args, sessionLabel, onLaunchStatus) =>
+          launchTargetApp(appPath, args, sessionLabel, onLaunchStatus),
         endSession: () => endSession(),
         killTarget: () => killMonitoredTargetApp(),
         resetRuntime: () => {
-          stopCollecting()
+          forceResetCollectChain()
           resetMonitorRuntimeState()
-          clearExternalMonitorState()
         },
         isSessionRunning: () => currentSession?.status === 'running',
+        ensureMonitorActive: (cdpPort, sessionLabel) => ensureBatchMonitorActive(cdpPort, sessionLabel),
         onProgress: (p) => {
+          lastAutomationBatchProgress = p
           console.log(`[Batch][${p.phase}] ${p.message}`)
           broadcastToRenderer('automation:progress', p)
+          broadcastAutomationStatus()
         },
       })
       return { ok: true, ...result }
@@ -1949,10 +2451,14 @@ function registerIpcHandlers(): void {
       return { ok: false, error: e instanceof Error ? e.message : String(e) }
     } finally {
       automationBatchRunning = false
+      lastAutomationBatchProgress = null
+      batchActiveSessionLabel = null
+      batchActiveCdpPort = null
       stopCollecting()
       resetMonitorRuntimeState()
       clearExternalMonitorState()
       targetAppProcess = null
+      broadcastAutomationStatus()
     }
   })
 
@@ -1965,14 +2471,81 @@ function registerIpcHandlers(): void {
       const mod = await import(pathToFileURL(modPath).href)
       const stepDelay = payload.stepDelayMs ?? 5000
       const scenario = mod.convertPlaywrightSource(source, 'converted', stepDelay)
-      const rel = 'scripts/scenarios/converted.scenario.json'
-      const abs = path.join(__dirname_electron, '..', rel)
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').slice(0, 15)
+      const rel = `scripts/scenarios/converted-${stamp}.scenario.json`
+      const abs = resolveScenarioPath(rel)
+      const content = JSON.stringify(scenario, null, 2)
       await fs.promises.mkdir(path.dirname(abs), { recursive: true })
-      await fs.promises.writeFile(abs, JSON.stringify(scenario, null, 2), 'utf-8')
-      return { ok: true, scenarioPath: rel, stepCount: scenario.steps?.length ?? 0 }
+      await fs.promises.writeFile(abs, content, 'utf-8')
+      return { ok: true, scenarioPath: rel, stepCount: scenario.steps?.length ?? 0, content }
     } catch (e) {
       return { ok: false, error: e instanceof Error ? e.message : String(e) }
     }
+  })
+
+  ipcMain.handle('automation:read-scenario', async (_e, scenarioPath: string) => {
+    const rel = String(scenarioPath ?? '').trim()
+    if (!rel) return { ok: false, error: '场景路径为空' }
+    try {
+      const abs = resolveScenarioPath(rel)
+      if (!fs.existsSync(abs)) return { ok: false, error: `场景不存在: ${rel}` }
+      const content = await fs.promises.readFile(abs, 'utf-8')
+      JSON.parse(content)
+      return { ok: true, scenarioPath: toScenarioDisplayPath(abs), content }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  ipcMain.handle('automation:write-scenario', async (_e, payload: { scenarioPath: string; content: string }) => {
+    const rel = String(payload?.scenarioPath ?? '').trim()
+    const content = payload?.content ?? ''
+    if (!rel) return { ok: false, error: '场景路径为空' }
+    if (!content.trim()) return { ok: false, error: '内容为空' }
+    try {
+      JSON.parse(content)
+      const abs = resolveScenarioPath(rel)
+      await fs.promises.mkdir(path.dirname(abs), { recursive: true })
+      await fs.promises.writeFile(abs, content, 'utf-8')
+      return { ok: true, scenarioPath: toScenarioDisplayPath(abs) }
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) }
+    }
+  })
+
+  ipcMain.handle('dialog:pick-scenario', async () => {
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+    if (!win) return { canceled: true as const }
+    const scenariosDir = path.join(getMonitorAppRoot(), 'scripts', 'scenarios')
+    const r = await dialog.showOpenDialog(win, {
+      title: '选择场景 JSON',
+      defaultPath: fs.existsSync(scenariosDir) ? scenariosDir : getMonitorAppRoot(),
+      filters: [
+        { name: '场景 JSON', extensions: ['json'] },
+        { name: '所有文件', extensions: ['*'] },
+      ],
+      properties: ['openFile'],
+    })
+    if (r.canceled || !r.filePaths[0]) return { canceled: true as const }
+    const displayPath = toScenarioDisplayPath(r.filePaths[0])
+    return { canceled: false as const, path: displayPath }
+  })
+
+  ipcMain.handle('dialog:save-scenario', async (_e, suggestedName?: string) => {
+    const win = BrowserWindow.getFocusedWindow() ?? mainWindow
+    if (!win) return { canceled: true as const }
+    const scenariosDir = path.join(getMonitorAppRoot(), 'scripts', 'scenarios')
+    const r = await dialog.showSaveDialog(win, {
+      title: '另存场景 JSON',
+      defaultPath: path.join(
+        scenariosDir,
+        suggestedName?.trim() || 'my.scenario.json',
+      ),
+      filters: [{ name: '场景 JSON', extensions: ['json'] }],
+    })
+    if (r.canceled || !r.filePath) return { canceled: true as const }
+    const displayPath = toScenarioDisplayPath(r.filePath)
+    return { canceled: false as const, path: displayPath }
   })
 
   // ---- 外部应用启动 / 附加到进程 ----
@@ -2165,14 +2738,7 @@ app.whenReady().then(() => {
 
   void startAutomationServer({
     queueMark: queueEventMark,
-    getStatus: () => ({
-      sessionRunning: currentSession?.status === 'running',
-      sessionId: currentSession?.id ?? null,
-      sessionLabel: currentSession?.label ?? null,
-      collecting: collectTimer != null,
-      externalMonitor: monitoredRootPid != null,
-      externalRootPid: monitoredRootPid,
-    }),
+    getStatus: () => getAutomationStatusSnapshot(),
     endSession: () => endSession(),
     launchMonitor: async (body: LaunchMonitorBody) => {
       const port = body.cdpPort ?? 9222

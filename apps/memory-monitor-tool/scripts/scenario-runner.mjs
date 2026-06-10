@@ -105,6 +105,17 @@ async function runStep(step, ctx) {
   }
 }
 
+async function disconnectCdpBrowser(browser) {
+  if (!browser) return
+  try {
+    // connectOverCDP：close 仅断开 Playwright 连接，不退出被测 Electron 进程
+    await browser.close()
+    console.log('[cdp] 已断开 Playwright 连接（被测应用保持运行）')
+  } catch (e) {
+    console.warn('[cdp] 断开连接时警告:', String(e))
+  }
+}
+
 async function main() {
   const argPath = process.argv[2]
   const { scenarioPath, scenario } = loadScenario(argPath)
@@ -115,66 +126,75 @@ async function main() {
   console.log('文件:', scenarioPath)
   if (scenario.description) console.log('说明:', scenario.description)
 
+  let browser = null
+
   try {
-    await mmtHealth()
-    console.log('[mmt] API 可达:', process.env.MMT_API_URL ?? 'http://127.0.0.1:39271')
-  } catch (e) {
-    console.warn('[mmt] 警告: 监控工具 API 不可达，mark 将失败。请先 pnpm dev 启动监控工具。')
-    console.warn(String(e))
+    try {
+      await mmtHealth()
+      console.log('[mmt] API 可达:', process.env.MMT_API_URL ?? 'http://127.0.0.1:39271')
+    } catch (e) {
+      console.warn('[mmt] 警告: 监控工具 API 不可达，mark 将失败。请先 pnpm dev 启动监控工具。')
+      console.warn(String(e))
+    }
+
+    const skipMmt = process.env.SKIP_MMT_SESSION === '1' || scenario.requireMmtSession === false
+    if (!skipMmt) {
+      console.log('[mmt] 等待运行中的监控会话…')
+      console.log('[mmt] 若尚未附加：请切到监控工具 → 选中游戏进程 →「附加并监控」（脚本最多等 5 分钟）')
+      const st = await waitForMmtSession(Number(process.env.MMT_SESSION_WAIT_MS ?? 300_000))
+      console.log('\n[mmt] 会话已就绪:', st.sessionLabel ?? st.sessionId)
+    } else {
+      console.log('[mmt] 已跳过会话等待（SKIP_MMT_SESSION 或 requireMmtSession:false）')
+    }
+
+    browser = await connectBrowser(playwright)
+    const page = await pickMainPage(browser, {
+      pageUrlIncludes: scenario.pageUrlIncludes || undefined,
+    })
+
+    const ctx = {
+      page,
+      browser,
+      scenarioPath,
+      autoMarkClicks: scenario.autoMarkClicks === true,
+      clickIndex: 1,
+      log: (...args) => console.log(...args),
+      mark: async (label, metadata) => {
+        try {
+          await mmtMark(label, metadata)
+          console.log('[mark]', label)
+        } catch (e) {
+          console.warn('[mark] 失败（继续执行）:', label, String(e))
+        }
+      },
+    }
+
+    if (scenario.warmupMs != null && Number(scenario.warmupMs) > 0) {
+      const warmup = Number(scenario.warmupMs)
+      await ctx.mark('warmup-start')
+      console.log('[warmup]', warmup, 'ms')
+      await sleep(warmup)
+      await ctx.mark('baseline')
+    }
+
+    const steps = Array.isArray(scenario.steps) ? scenario.steps : []
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i]
+      console.log(`\n--- step ${i + 1}/${steps.length}: ${step.type} ---`)
+      await runStep(step, ctx)
+    }
+
+    console.log('\n=== 场景完成 ===')
+  } finally {
+    await disconnectCdpBrowser(browser)
   }
-
-  const skipMmt = process.env.SKIP_MMT_SESSION === '1' || scenario.requireMmtSession === false
-  if (!skipMmt) {
-    console.log('[mmt] 等待运行中的监控会话…')
-    console.log('[mmt] 若尚未附加：请切到监控工具 → 选中游戏进程 →「附加并监控」（脚本最多等 5 分钟）')
-    const st = await waitForMmtSession(Number(process.env.MMT_SESSION_WAIT_MS ?? 300_000))
-    console.log('\n[mmt] 会话已就绪:', st.sessionLabel ?? st.sessionId)
-  } else {
-    console.log('[mmt] 已跳过会话等待（SKIP_MMT_SESSION 或 requireMmtSession:false）')
-  }
-
-  const browser = await connectBrowser(playwright)
-  const page = await pickMainPage(browser, {
-    pageUrlIncludes: scenario.pageUrlIncludes || undefined,
-  })
-
-  const ctx = {
-    page,
-    browser,
-    scenarioPath,
-    autoMarkClicks: scenario.autoMarkClicks === true,
-    clickIndex: 1,
-    log: (...args) => console.log(...args),
-    mark: async (label, metadata) => {
-      try {
-        await mmtMark(label, metadata)
-        console.log('[mark]', label)
-      } catch (e) {
-        console.warn('[mark] 失败（继续执行）:', label, String(e))
-      }
-    },
-  }
-
-  if (scenario.warmupMs != null && Number(scenario.warmupMs) > 0) {
-    const warmup = Number(scenario.warmupMs)
-    await ctx.mark('warmup-start')
-    console.log('[warmup]', warmup, 'ms')
-    await sleep(warmup)
-    await ctx.mark('baseline')
-  }
-
-  const steps = Array.isArray(scenario.steps) ? scenario.steps : []
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i]
-    console.log(`\n--- step ${i + 1}/${steps.length}: ${step.type} ---`)
-    await runStep(step, ctx)
-  }
-
-  console.log('\n=== 场景完成 ===')
-  console.log('请勿 browser.close()；被测应用保持运行，请在监控工具中结束会话。')
 }
 
-main().catch((err) => {
-  console.error(err)
-  process.exit(1)
-})
+main()
+  .then(() => {
+    process.exit(0)
+  })
+  .catch((err) => {
+    console.error(err)
+    process.exit(1)
+  })

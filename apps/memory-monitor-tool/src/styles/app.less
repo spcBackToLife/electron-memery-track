@@ -217,66 +217,216 @@ body {
   }
 }
 
-.mmt-automation-batch {
+.mmt-automation-page {
+  display: grid;
+  grid-template-columns: 1fr 280px;
+  gap: 20px;
+  align-items: start;
+  padding-bottom: 24px;
+
+  @media (max-width: 960px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mmt-automation-header {
+  grid-column: 1 / -1;
+  h2 { margin-bottom: 8px; font-size: 20px; }
+  .section-desc { color: @text-secondary; font-size: 13px; line-height: 1.6; }
+}
+
+.mmt-automation-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.mmt-automation-step-card {
   background: @bg-secondary;
+  border: 1px solid @border-color;
   border-radius: 10px;
-  padding: 16px 20px;
-  margin-bottom: 16px;
-  border: 1px solid rgba(179, 127, 235, 0.25);
+  padding: 16px 18px;
 
-  h3 { margin-bottom: 6px; font-size: 15px; }
+  h3 { font-size: 14px; margin-bottom: 10px; color: @text-primary; }
 
-  .mmt-automation-row {
-    margin-bottom: 10px;
-    label { display: block; font-size: 12px; color: @text-secondary; margin-bottom: 4px; }
-    input[type='text'], input[type='number'] {
-      width: 100%;
-      padding: 8px 12px;
-      background: @bg-primary;
-      border: 1px solid @border-color;
-      border-radius: 6px;
-      color: @text-primary;
-      font-size: 13px;
-    }
-  }
-
-  .mmt-automation-path-row {
-    display: flex;
-    gap: 8px;
-    input { flex: 1; }
-  }
-
-  .mmt-automation-row-inline {
-    display: flex;
-    gap: 16px;
-    label { display: flex; flex-direction: column; gap: 4px; flex: 1; }
-  }
-
-  .mmt-automation-convert {
-    margin: 12px 0;
-    textarea {
-      width: 100%;
-      margin: 8px 0;
-      padding: 8px;
-      background: @bg-primary;
-      border: 1px solid @border-color;
-      border-radius: 6px;
-      color: @text-primary;
-      font-family: ui-monospace, monospace;
-      font-size: 12px;
-    }
-  }
-
-  .mmt-automation-log {
-    margin-top: 12px;
-    padding: 10px;
+  input[type='text'] {
+    padding: 8px 12px;
     background: @bg-primary;
+    border: 1px solid @border-color;
     border-radius: 6px;
-    font-size: 11px;
-    max-height: 160px;
-    overflow: auto;
+    color: @text-primary;
+    font-size: 13px;
+    outline: none;
+    &:focus { border-color: @accent; }
+  }
+}
+
+.mmt-automation-step-run {
+  border-color: rgba(179, 127, 235, 0.35);
+  background: linear-gradient(135deg, @bg-secondary 0%, rgba(100, 108, 255, 0.06) 100%);
+}
+
+.mmt-automation-path-row {
+  display: flex;
+  gap: 8px;
+  input { flex: 1; }
+}
+
+.mmt-automation-full-input {
+  width: 100%;
+  padding: 8px 12px;
+  background: @bg-primary;
+  border: 1px solid @border-color;
+  border-radius: 6px;
+  color: @text-primary;
+  font-size: 13px;
+}
+
+.mmt-automation-field-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: @text-secondary;
+}
+
+.mmt-automation-row-inline {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+  label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    font-size: 12px;
     color: @text-secondary;
   }
+  input[type='number'] {
+    padding: 8px 12px;
+    background: @bg-primary;
+    border: 1px solid @border-color;
+    border-radius: 6px;
+    color: @text-primary;
+  }
+}
+
+.mmt-automation-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: @text-muted;
+  line-height: 1.5;
+}
+
+.mmt-automation-run-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 8px;
+
+  .btn-lg {
+    padding: 10px 22px;
+    font-size: 14px;
+  }
+}
+
+.mmt-automation-editor-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 10px 0 6px;
+}
+
+.mmt-automation-editor-meta {
+  font-size: 12px;
+  color: @text-muted;
+}
+
+.mmt-automation-editor-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mmt-automation-json-editor {
+  width: 100%;
+  min-height: 280px;
+  padding: 10px 12px;
+  background: @bg-primary;
+  border: 1px solid @border-color;
+  border-radius: 6px;
+  color: @text-primary;
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+  &:focus { border-color: @accent; }
+}
+
+.mmt-automation-convert {
+  margin-top: 12px;
+  textarea {
+    width: 100%;
+    margin: 8px 0;
+    padding: 8px;
+    background: @bg-primary;
+    border: 1px solid @border-color;
+    border-radius: 6px;
+    color: @text-primary;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+  }
+}
+
+.mmt-automation-sidebar {
+  background: @bg-secondary;
+  border: 1px solid @border-color;
+  border-radius: 10px;
+  padding: 14px 16px;
+  position: sticky;
+  top: 12px;
+
+  h4 {
+    font-size: 13px;
+    margin-bottom: 8px;
+    color: @text-secondary;
+  }
+}
+
+.mmt-automation-status-list {
+  list-style: none;
+  margin-bottom: 16px;
+  li {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid @border-color;
+    font-size: 12px;
+    span { color: @text-muted; flex-shrink: 0; }
+    strong {
+      color: @text-primary;
+      text-align: right;
+      max-width: 62%;
+      line-height: 1.4;
+      &.mmt-status-active { color: @accent; }
+    }
+  }
+}
+
+.mmt-automation-log {
+  padding: 10px;
+  background: @bg-primary;
+  border-radius: 6px;
+  font-size: 11px;
+  max-height: 320px;
+  overflow: auto;
+  color: @text-secondary;
+  line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 .launch-form-row {
@@ -1544,3 +1694,253 @@ body {
 .mmt-toast-error { background: fade(@danger, 90%); color: #fff; }
 .mmt-toast-info { background: fade(#1890ff, 90%); color: #fff; }
 .mmt-toast-warning { background: fade(@warning, 92%); color: #333; }
+
+// ============ Batch Report Page ============
+.mmt-batch-report-page {
+  max-width: 1500px;
+}
+
+.batch-sidebar-hint {
+  margin-bottom: 10px;
+  font-size: 11px;
+}
+
+.batch-run-filter-panel {
+  margin-top: 18px;
+  padding: 14px 16px;
+  background: @bg-primary;
+  border-radius: 8px;
+  border: 1px solid @border-color;
+}
+
+.batch-run-filter-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+
+  h3 { margin: 0; font-size: 15px; }
+}
+
+.batch-run-filter-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.batch-run-chip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.batch-run-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid @border-color;
+  cursor: pointer;
+  transition: background 0.15s;
+
+  &:hover { background: fade(@accent, 6%); }
+  input { margin-top: 3px; flex-shrink: 0; }
+}
+
+.batch-run-chip--off {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.batch-run-chip--outlier:not(.batch-run-chip--off) {
+  border-color: fade(@warning, 45%);
+  background: fade(@warning, 6%);
+}
+
+.batch-run-chip-text {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.batch-run-chip-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: fade(@warning, 20%);
+  color: @warning;
+}
+
+.batch-session-label-cell {
+  max-width: 200px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+
+.batch-baseline-panel {
+  margin-top: 18px;
+}
+
+.batch-baseline-grid .summary-card {
+  text-align: left;
+  padding: 12px 14px;
+
+  .batch-stat-sub {
+    display: block;
+    margin-top: 6px;
+    font-size: 10.5px;
+    color: @text-muted;
+    line-height: 1.4;
+  }
+}
+
+.batch-runs-table-section {
+  margin-top: 24px;
+}
+
+.batch-table-scroll {
+  overflow-x: auto;
+  margin-top: 10px;
+  border-radius: 8px;
+  border: 1px solid @border-color;
+}
+
+.batch-runs-table {
+  font-size: 11.5px;
+  white-space: nowrap;
+
+  th, td {
+    padding: 6px 8px;
+  }
+
+  .batch-subhead th {
+    font-size: 10px;
+    color: @text-muted;
+    font-weight: 500;
+  }
+}
+
+.batch-row-outlier {
+  background: fade(@warning, 8%);
+}
+
+.batch-row-excluded {
+  opacity: 0.45;
+}
+
+.batch-outlier-cell {
+  max-width: 140px;
+  white-space: normal;
+  font-size: 10.5px;
+  color: @warning;
+}
+
+.batch-charts-section {
+  margin-top: 28px;
+}
+
+.batch-process-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 12px;
+
+  .batch-process-picker-label {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 13px;
+  }
+
+  .batch-process-select {
+    width: 100%;
+    max-width: 100%;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: @bg-primary;
+    border: 1px solid @border-color;
+    color: @text-primary;
+    font-size: 11.5px;
+    font-family: inherit;
+  }
+}
+
+.batch-process-cmd-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: @bg-primary;
+  border-radius: 8px;
+  border: 1px solid @border-color;
+}
+
+.batch-type-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  background: fade(@accent, 18%);
+  color: @accent;
+  white-space: nowrap;
+}
+
+.batch-cmd-text {
+  flex: 1;
+  min-width: 200px;
+  font-size: 11px;
+  color: @text-secondary;
+  word-break: break-all;
+  line-height: 1.45;
+}
+
+.batch-coverage-warn {
+  font-size: 11px;
+  color: @warning;
+  width: 100%;
+}
+
+.batch-charts-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.batch-multi-chart {
+  background: @bg-primary;
+  border-radius: 8px;
+  padding: 14px;
+  border: 1px solid @border-color;
+
+  h4 {
+    font-size: 14px;
+    margin-bottom: 6px;
+  }
+}
+
+.batch-charts-section-title {
+  margin-top: 8px;
+  font-size: 15px;
+}
+
+.batch-resource-charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 14px;
+}
+
+.batch-mark-chart-hint {
+  margin-bottom: 4px;
+}

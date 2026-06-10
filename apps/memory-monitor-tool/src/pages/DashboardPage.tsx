@@ -5,7 +5,6 @@ import MemoryTrendChart from '../components/MemoryTrendChart'
 import ExternalPerfTrendCharts from '../components/ExternalPerfTrendCharts'
 import MemoryDistributionPie from '../components/MemoryDistributionPie'
 import SessionControl from '../components/SessionControl'
-import AutomationBatchPanel from '../components/AutomationBatchPanel'
 import { useSession } from '../hooks/useSession'
 import { useToast } from '../context/ToastContext'
 import type { MemoryData } from '../hooks/useMemoryData'
@@ -94,13 +93,6 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
   const [displayTargetInfo, setDisplayTargetInfo] = useState<string | null>(null)
   const [showProcessList, setShowProcessList] = useState(false)
   const [sessionLabel, setSessionLabel] = useState('')
-  const [automationApiUrl, setAutomationApiUrl] = useState<string | null>(null)
-
-  useEffect(() => {
-    void window.monitorAPI.getAutomationInfo().then((info) => {
-      if (info.baseUrl) setAutomationApiUrl(info.baseUrl)
-    }).catch(() => { /* ignore */ })
-  }, [])
 
   /** 拉取系统全部进程列表（C++ Toolhelp32） */
   const fetchProcessList = useCallback(async () => {
@@ -380,13 +372,6 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
           ) : (
             <> 未附加外部进程时，下方数据为本监控工具自身。</>
           )}
-          {automationApiUrl ? (
-            <>
-              {' '}
-              自动化 API：<code>{automationApiUrl}</code>（跑场景 <code>pnpm scenario</code> /
-              录制 <code>pnpm scenario:codegen</code>，需被测应用已开 9222）。
-            </>
-          ) : null}
         </p>
 
         {/* 搜索 + 刷新 + 附件按钮 */}
@@ -520,8 +505,6 @@ const DashboardPage: React.FC<DashboardPageProps> = ({ memoryData }) => {
           </div>
         )}
       </div>
-
-      <AutomationBatchPanel />
 
       {/* 会话控制 */}
       <SessionControl

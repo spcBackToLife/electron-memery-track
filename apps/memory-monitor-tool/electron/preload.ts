@@ -62,6 +62,9 @@ const api = {
   getAutomationInfo: () =>
     ipcRenderer.invoke('automation:get-info') as Promise<{ baseUrl: string | null; port: number | null }>,
 
+  getAutomationStatus: () =>
+    ipcRenderer.invoke('automation:get-status') as Promise<Record<string, unknown>>,
+
   runAutomationBatch: (opts: Record<string, unknown>) =>
     ipcRenderer.invoke('automation:run-batch', opts) as Promise<{
       ok: boolean
@@ -76,12 +79,44 @@ const api = {
       error?: string
       scenarioPath?: string
       stepCount?: number
+      content?: string
     }>,
+
+  readScenario: (scenarioPath: string) =>
+    ipcRenderer.invoke('automation:read-scenario', scenarioPath) as Promise<{
+      ok: boolean
+      error?: string
+      scenarioPath?: string
+      content?: string
+    }>,
+
+  writeScenario: (payload: { scenarioPath: string; content: string }) =>
+    ipcRenderer.invoke('automation:write-scenario', payload) as Promise<{
+      ok: boolean
+      error?: string
+      scenarioPath?: string
+    }>,
+
+  pickScenario: () =>
+    ipcRenderer.invoke('dialog:pick-scenario') as Promise<
+      { canceled: true } | { canceled: false; path: string }
+    >,
+
+  saveScenarioAs: (suggestedName?: string) =>
+    ipcRenderer.invoke('dialog:save-scenario', suggestedName) as Promise<
+      { canceled: true } | { canceled: false; path: string }
+    >,
 
   onAutomationProgress: (callback: (data: unknown) => void) => {
     const handler = (_event: unknown, data: unknown) => callback(data)
     ipcRenderer.on('automation:progress', handler)
     return () => ipcRenderer.removeListener('automation:progress', handler)
+  },
+
+  onAutomationStatus: (callback: (data: unknown) => void) => {
+    const handler = (_event: unknown, data: unknown) => callback(data)
+    ipcRenderer.on('automation:status', handler)
+    return () => ipcRenderer.removeListener('automation:status', handler)
   },
 
   // ---- 事件监听（主进程 -> 渲染进程） ----

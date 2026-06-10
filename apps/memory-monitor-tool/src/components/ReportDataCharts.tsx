@@ -156,7 +156,7 @@ const ReportDataCharts: React.FC<ReportDataChartsProps> = ({ report, eventMarks,
         {usePerPid
           ? '按子进程 PID 独立展示内存折线（按峰值排序 Top 12），便于定位持续增长的进程。'
           : '基于会话内采样点绘制，与实时监控页指标口径一致。'}
-        {marks.length > 0 ? ' 橙色竖线为事件标记时刻（与下方「阶段标记」表对应）。' : ''}
+        {marks.length > 0 ? ' 橙色竖线为阶段标记时刻；标签见下方「阶段标记」表，避免叠在曲线上遮挡。' : ''}
       </p>
       <ResponsiveContainer width="100%" height={320} debounce={200}>
         <LineChart data={displayData} margin={{ top: 8, right: 28, left: 8, bottom: 8 }}>
@@ -239,7 +239,6 @@ const ReportDataCharts: React.FC<ReportDataChartsProps> = ({ report, eventMarks,
               stroke="#faad14"
               strokeDasharray="4 3"
               strokeWidth={1.5}
-              label={{ value: mark.label, position: 'top', fill: '#faad14', fontSize: 10 }}
             />
           ))}
         </LineChart>

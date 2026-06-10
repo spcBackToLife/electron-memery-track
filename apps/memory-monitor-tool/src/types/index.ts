@@ -181,7 +181,7 @@ export interface ReportSummary {
 
 // ============ 对比结果 ============
 
-export type PageType = 'dashboard' | 'report' | 'compare'
+export type PageType = 'dashboard' | 'automation' | 'report' | 'batch-report' | 'compare'
 
 export interface CompareResult {
   baseSession: { id: string; label: string }

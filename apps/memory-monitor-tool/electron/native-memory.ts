@@ -316,12 +316,21 @@ export function enumerateProcessTreeNativeSync(rootPid: number): NativeProcessTr
  */
 const GATHER_EXTERNAL_TIMEOUT_MS = 10000
 
+let gatherExternalInFlight: Promise<ExternalGatheredSnapshotPayload | null> | null = null
+
 export async function gatherExternalMonitorSnapshotAsync(
   rootPid: number,
 ): Promise<ExternalGatheredSnapshotPayload | null> {
   const mod = nativeModule
   if (!mod || !IS_WINDOWS || !Number.isFinite(rootPid) || rootPid <= 0) return null
   if (typeof mod.gatherExternalMonitorSnapshotAsync !== 'function') return null
+  if (gatherExternalInFlight) {
+    try {
+      await gatherExternalInFlight
+    } catch { /* 上一轮失败也继续 */ }
+  }
+
+  const run = async (): Promise<ExternalGatheredSnapshotPayload | null> => {
   try {
     const raw = await Promise.race([
       mod.gatherExternalMonitorSnapshotAsync(Math.floor(rootPid)),
@@ -421,6 +430,15 @@ export async function gatherExternalMonitorSnapshotAsync(
       console.warn('[MonitorTool] gatherExternalMonitorSnapshotAsync failed:', e)
     }
     return null
+  }
+  }
+
+  const task = run()
+  gatherExternalInFlight = task
+  try {
+    return await task
+  } finally {
+    if (gatherExternalInFlight === task) gatherExternalInFlight = null
   }
 }
 

@@ -1,5 +1,12 @@
 import type { MemorySnapshot, ProcessMemoryInfo } from '../types'
 import { getEffectiveMemoryKB } from './format'
+import {
+  describeProcessIdentity,
+  identityKeyForProc,
+  pickRepresentativeProc,
+} from './processIdentity'
+
+export { identityKeyForProc } from './processIdentity'
 
 /** 会话合计，或某条「进程身份」曲线（按命令行 / 镜像路径 / 名称聚合，非裸 PID） */
 export type ComparePidSelection = 'aggregate' | string
@@ -28,36 +35,6 @@ export interface PidCompareRow {
 function procMemMB(p: ProcessMemoryInfo | undefined): number {
   if (!p) return 0
   return Math.round((getEffectiveMemoryKB(p.memory) / 1024) * 10) / 10
-}
-
-/** 归一化镜像路径，便于跨会话匹配 */
-function stableExeKey(raw: string | undefined): string | null {
-  const t = raw?.trim()
-  if (!t) return null
-  return t.replace(/\//g, '\\').toLowerCase()
-}
-
-/** 归一化命令行（跨会话 PID 会变，命令行更贴近「同一启动方式」） */
-function stableCmdKey(raw: string | undefined): string | null {
-  const t = raw?.trim()
-  if (!t) return null
-  return t.replace(/\s+/g, ' ').toLowerCase()
-}
-
-/**
- * 单进程在单次快照中的对比身份：
- * 1) 有 CommandLine → 按命令行
- * 2) 否则有 ExecutablePath → 按镜像路径
- * 3) 外部模式有进程名 → 按名称（弱匹配，多实例会合并）
- * 4) 否则按 PID（自监控或缺字段）
- */
-export function identityKeyForProc(p: ProcessMemoryInfo, sn: MemorySnapshot): string {
-  const cmdK = stableCmdKey(p.commandLine)
-  if (cmdK) return `cmd:${cmdK}`
-  const exeK = stableExeKey(p.executablePath)
-  if (exeK) return `exe:${exeK}`
-  if (sn.monitorMode === 'external' && p.name?.trim()) return `name:${p.name.trim().toLowerCase()}`
-  return `pid:${p.pid}`
 }
 
 function memSumByIdentity(sn: MemorySnapshot, key: string): number {
@@ -104,35 +81,18 @@ function inferLabelAndDetail(
   base: MemorySnapshot[],
   target: MemorySnapshot[],
 ): { label: string; detail?: string } {
-  const pickProc = (): ProcessMemoryInfo | undefined => {
-    for (let i = target.length - 1; i >= 0; i--) {
-      for (const p of target[i]!.processes) {
-        if (identityKeyForProc(p, target[i]!) === key) return p
-      }
-    }
-    for (let i = base.length - 1; i >= 0; i--) {
-      for (const p of base[i]!.processes) {
-        if (identityKeyForProc(p, base[i]!) === key) return p
-      }
-    }
-    return undefined
+  const proc = pickRepresentativeProc([{ snapshots: target }, { snapshots: base }], key)
+  const { typeLabel, processName, cmdFull, cmdPreview } = describeProcessIdentity(
+    key,
+    proc,
+    0,
+    0,
+    0,
+  )
+  return {
+    label: `[${typeLabel}] ${processName}`,
+    detail: cmdFull || cmdPreview,
   }
-  const p = pickProc()
-  if (key.startsWith('cmd:')) {
-    const cmd = p?.commandLine?.trim() || key.slice(4)
-    const short = cmd.length > 72 ? `${cmd.slice(0, 70)}…` : cmd
-    return { label: p?.name?.trim() || '命令行进程', detail: cmd }
-  }
-  if (key.startsWith('exe:')) {
-    const path = p?.executablePath?.trim() || key.slice(4)
-    const baseName = path.split(/[/\\]/).pop() || path
-    return { label: baseName, detail: path }
-  }
-  if (key.startsWith('name:')) {
-    return { label: key.slice(5) }
-  }
-  const pid = Number(key.slice(4))
-  return { label: Number.isFinite(pid) ? `PID ${pid}` : key }
 }
 
 function seriesForIdentity(snaps: MemorySnapshot[], n: number, key: string): number[] {

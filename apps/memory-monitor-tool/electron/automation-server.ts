@@ -14,6 +14,12 @@ export interface AutomationStatus {
   collecting: boolean
   externalMonitor: boolean
   externalRootPid: number | null
+  batchRunning?: boolean
+  batchPhase?: string | null
+  batchMessage?: string | null
+  batchRunIndex?: number
+  batchTotalRuns?: number
+  monitorReady?: boolean
 }
 
 export interface LaunchMonitorBody {
