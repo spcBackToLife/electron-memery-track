@@ -306,11 +306,11 @@ function pruneExternalExcludedToTree(displayPids: number[]): void {
 /**
  * 判断子进程是否属于「与启动的 exe 同一应用」侧（对齐任务管理器里多进程共一镜像的做法）：
  * - 根进程始终保留；
- * - 镜像路径与启动 exe **完全相同**（Chromium/CEF 系子进程多为同一 王者荣耀世界.exe + 不同 --type）；
+ * - 镜像路径与启动 exe **完全相同**（Chromium/CEF 系子进程多为同一 GameClient.exe + 不同 --type）；
  * - 或镜像文件名与启动 exe **相同**（同目录换盘等边缘情况）；
  * - 或命令行中出现启动 exe 的**完整规范化路径**（兼容 / 与 \\）。
  *
- * 刻意**不再**使用「仅同安装目录」规则，否则会误留同目录下的 upgrader.exe、downloader_hdiff.exe、TASLogin64.exe。
+ * 刻意**不再**使用「仅同安装目录」规则，否则会误留同目录下的 updater.exe、patch_worker.exe 等辅助进程。
  *
  * 命令行由 Native（NtQueryInformationProcess ProcessCommandLineInformation）读取；不再使用 PowerShell/WMI 枚举子树。
  */
@@ -349,12 +349,12 @@ function filterExternalPidsToSameApp(
     const cmd = (commandLine.get(pid) || '').toLowerCase()
     const exeBase = exeNorm ? path.basename(exeNorm).toLowerCase() : ''
 
-    // 与启动器同一物理镜像（任务管理器里 gpu/renderer 等多为同一 王者荣耀世界.exe）
+    // 与启动器同一物理镜像（任务管理器里 gpu/renderer 等多为同一 GameClient.exe）
     if (exeNorm === launchNorm) return true
     // 同目录下同文件名（避免仅 basename 相同但路径无关的误匹配）
     if (exeBase === launchBase && exeNorm.startsWith(launchDirPrefix)) return true
 
-    // 命令行里带完整启动路径（如 "...王者荣耀世界.exe" --type=gpu-process）
+    // 命令行里带完整启动路径（如 "...GameClient.exe" --type=gpu-process）
     if (launchNorm && cmd.includes(launchNorm)) return true
     if (launchNormSlash && cmd.includes(launchNormSlash)) return true
 

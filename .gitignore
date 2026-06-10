@@ -1,6 +1,10 @@
 # Dependencies
 node_modules
 
+# node-gyp 本地构建产物（含本机路径，勿提交）
+**/native/build/
+**/native/node_modules/
+
 # Build output (apps)
 apps/**/dist
 apps/**/dist-electron
